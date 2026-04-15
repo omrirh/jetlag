@@ -4,7 +4,7 @@ mirror:
   operators:
 {% for catalog in catalogs_to_sync %}
   - catalog: {{ catalog.catalog }}
-    targetCatalog: redhat/{{ operator_index_name }}
+    targetCatalog: {{ catalog.target_catalog | default('redhat/' + operator_index_name) }}
     targetTag: {{ operator_index_tag }}
     packages:
 {%   for package in catalog.packages %}
@@ -15,8 +15,12 @@ mirror:
       channels:
 {% for channel in package.channels %}
       - name: "{{ channel.name }}"
+{%   if "minVersion" in channel %}
         minVersion: {{ channel.minVersion }}
+{%   endif %}
+{%   if "maxVersion" in channel %}
         maxVersion: {{ channel.maxVersion }}
+{%   endif %}
 {%   endfor %}
 {%   endfor %}
 {% endfor %}
@@ -26,3 +30,4 @@ mirror:
     - name: {{ image }}
 {%   endfor %}
 {% endif %}
+
