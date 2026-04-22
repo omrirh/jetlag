@@ -44,3 +44,31 @@
   shell: |
     oc image mirror -a {{ registry_path }}/pull-secret-bastion.txt {{ item.src }} {{ registry_host }}:{{ registry_port }}/{{ item.dest }} --keep-manifest-list --continue-on-error=true
   loop: "{{ extra_images | default([]) }}"
+- name: Query bastion registry for actual tags of mirrored catalog indexes
+  uri:
+    url: "https://{{ registry_host }}:{{ registry_port }}/v2/{{ item.target_catalog }}/tags/list"
+    user: "{{ registry_user }}"
+    password: "{{ registry_password }}"
+    force_basic_auth: true
+    validate_certs: false
+    return_content: true
+  register: catalog_tag_query
+  loop: "{{ catalogs_to_sync | selectattr('target_catalog', 'defined') | list }}"
+  when: catalogs_to_sync | selectattr('target_catalog', 'defined') | list | length > 0
+
+- name: Build catalog source definitions from registry query results
+  set_fact:
+    catalog_source_defs: "{{ catalog_source_defs | default([]) + [new_entry] }}"
+  vars:
+    new_entry:
+      name: "{{ item.item.target_catalog | replace('/', '-') }}"
+      image: "{{ registry_host }}:{{ registry_port }}/{{ item.item.target_catalog }}:{{ item.json.tags[0] }}"
+      display_name: "{{ item.item.target_catalog | split('/') | last }}"
+  loop: "{{ catalog_tag_query.results }}"
+  when: catalog_tag_query is not skipped and catalog_tag_query.results is defined
+
+- name: Generate catalog-sources.yaml for multi-catalog operator sync
+  template:
+    src: catalog-sources.yaml.j2
+    dest: "{{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/catalog-sources.yaml"
+  when: catalog_source_defs is defined and catalog_source_defs | length > 0

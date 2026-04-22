@@ -4,6 +4,8 @@
 # This will be your bastion machine (if you run setup-bastion playbook)
 registry_host: "{{ groups['bastion'][0] }}"
 registry_port: 5000
+registry_user: registry
+registry_password: registry
 
 registry_path: /opt/registry
 

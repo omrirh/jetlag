@@ -167,6 +167,11 @@
     KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ idms_configuration }}
   when: (use_bastion_registry | default(false) | bool) or (use_prega_content | default(false) | bool)
 
+- name: Apply oc mirror ImageTagMirrorSet on bastion registry clusters
+  shell: |
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/itms-oc-mirror.yaml
+  when: use_bastion_registry | default(false)
+
 - name: Apply ImageTagMirrorSet on bastion registry clusters
   shell: |
     cat <<EOF | KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f -
@@ -183,10 +188,25 @@
   loop: "{{ image_tag_mirrors | default([]) }}"
   when: use_bastion_registry | default(false)
 
+- name: Check for generated multi-catalog catalog-sources.yaml
+  stat:
+    path: "{{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/catalog-sources.yaml"
+  register: catalog_sources_stat
+  when: use_bastion_registry | default(false)
+
+- name: Apply generated multi-catalog CatalogSources on bastion registry clusters
+  shell: |
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/catalog-sources.yaml
+  when:
+    - use_bastion_registry | default(false)
+    - (catalog_sources_stat.stat | default({'exists': false})).exists
+
 - name: Apply oc mirror catalogSource on bastion registry clusters
   shell: |
-    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ catalogsource_bastion_configuration }}
-  when: use_bastion_registry | default(false)
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/{{ generated_operator_index_name_tag }}.yaml
+  when:
+    - use_bastion_registry | default(false)
+    - not (catalog_sources_stat.stat | default({'exists': false})).exists
 
 - name: Apply custom CatalogSources
   shell: |

@@ -1,0 +1,13 @@
+{% for cs in catalog_source_defs %}
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: {{ cs.name }}
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: {{ cs.image }}
+  displayName: {{ cs.display_name }}
+  publisher: Red Hat
+{% endfor %}
