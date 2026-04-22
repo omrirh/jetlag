@@ -9,7 +9,7 @@ supermicro_nodes={{ has_supermicro | bool }}
 controlplane_network={{ controlplane_network }}
 controlplane_network_prefix={{ controlplane_network_prefix }}
 {% endif %}
-{% if public_vlan and (lab == "scalelab" or lab == "performancelab") %}
+{% if lab == "scalelab" or lab == "performancelab" %}
 base_dns_name={{ labs[lab]['base_dns_name'] }}
 {% else %}
 base_dns_name={{ base_dns_name }}
