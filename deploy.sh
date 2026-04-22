@@ -87,8 +87,8 @@ check_step_done() {
 		[[ -f "ansible/inventory/${CLOUD_ID}.local" ]]
 		;;
 	3)
-		# Check if bastion registry is up on port 5000
-		curl -sf --max-time 3 http://localhost:5000/v2/ >/dev/null 2>&1
+		# Registry is up if we get any HTTP response (200 or 401 auth-required both mean it's running)
+		[[ $(curl -sk --max-time 3 -o /dev/null -w "%{http_code}" https://localhost:5000/v2/ 2>/dev/null) != "000" ]]
 		;;
 	4)
 		[[ -f "$MARKER_SYNC_OCP" ]]
@@ -124,17 +124,19 @@ print_sync_summary() {
 	local log="$1"
 	local step_name="$2"
 
-	local manifest_unknown unauthorized bundle_skipped other_errors
-	manifest_unknown=$(grep -ciE 'manifest.?unknown' "$log" 2>/dev/null || echo 0)
-	unauthorized=$(grep -ciE 'unauthorized|access.?denied' "$log" 2>/dev/null || echo 0)
-	bundle_skipped=$(grep -ciE 'bundle.*skip|skip.*bundle' "$log" 2>/dev/null || echo 0)
+	local manifest_unknown unauthorized bundle_skipped failed_copy other_errors
+	manifest_unknown=$(grep -ciE 'manifest.?unknown' "$log" 2>/dev/null || true)
+	unauthorized=$(grep -ciE 'unauthorized|access.?denied' "$log" 2>/dev/null || true)
+	bundle_skipped=$(grep -ciE 'bundle.*skip|skip.*bundle' "$log" 2>/dev/null || true)
+	# oc mirror v2 reports copy failures as: [ERROR] : Failed to copy ...
+	failed_copy=$(grep -ciE '\[ERROR\].*[Ff]ailed to copy' "$log" 2>/dev/null || true)
 
-	# Count general error lines not already covered by the categories above
-	other_errors=$(grep -iE 'level=error|FAILED!' "$log" 2>/dev/null \
-		| grep -civE 'manifest.?unknown|unauthorized|access.?denied|bundle.*skip|skip.*bundle' \
-		|| echo 0)
+	# Count remaining error lines not covered by the specific categories above
+	other_errors=$(grep -iE 'level=error|\[ERROR\]|FAILED!' "$log" 2>/dev/null \
+		| grep -civE 'manifest.?unknown|unauthorized|access.?denied|bundle.*skip|skip.*bundle|[Ff]ailed to copy' \
+		|| true)
 
-	local total=$(( manifest_unknown + unauthorized + bundle_skipped + other_errors ))
+	local total=$(( ${manifest_unknown:-0} + ${unauthorized:-0} + ${bundle_skipped:-0} + ${failed_copy:-0} + ${other_errors:-0} ))
 
 	echo ""
 	echo "  --- ${step_name} image sync summary ---"
@@ -146,6 +148,7 @@ print_sync_summary() {
 		[[ $manifest_unknown -gt 0 ]] && printf "  %-22s %d\n" "manifest-unknown" "$manifest_unknown"
 		[[ $unauthorized -gt 0 ]]     && printf "  %-22s %d\n" "unauthorized" "$unauthorized"
 		[[ $bundle_skipped -gt 0 ]]   && printf "  %-22s %d\n" "bundle skipped" "$bundle_skipped"
+		[[ $failed_copy -gt 0 ]]      && printf "  %-22s %d\n" "failed to copy" "$failed_copy"
 		[[ $other_errors -gt 0 ]]     && printf "  %-22s %d\n" "other errors" "$other_errors"
 	fi
 	echo "  Full log: ${log}"
@@ -163,22 +166,22 @@ patch_yaml_scalar() {
 patch_rhoai_vars() {
 	if [[ -n "$RHOAI_CATALOG" ]]; then
 		echo "      Patching RHOAI catalog → ${RHOAI_CATALOG}"
-		yq -i '.catalogs_to_sync[0].catalog = "'"${RHOAI_CATALOG}"'"' "$SYNC_OP_VARS"
+		yq -yi '.catalogs_to_sync[0].catalog = "'"${RHOAI_CATALOG}"'"' "$SYNC_OP_VARS"
 	fi
 	if [[ -n "$RHOAI_FBC_IMAGE" ]]; then
 		echo "      Patching RHOAI FBC image → ${RHOAI_FBC_IMAGE}"
-		yq -i '.additional_images += ["'"${RHOAI_FBC_IMAGE}"'"]' "$SYNC_OP_VARS"
+		yq -yi '.additional_images += ["'"${RHOAI_FBC_IMAGE}"'"]' "$SYNC_OP_VARS"
 	fi
 	if [[ -n "$RHOAI_VERSION" ]]; then
 		echo "      Patching RHOAI version → ${RHOAI_VERSION}"
-		yq -i '
+		yq -yi '
 			.catalogs_to_sync[0].packages[0].channels[0].minVersion = "'"${RHOAI_VERSION}"'" |
 			.catalogs_to_sync[0].packages[0].channels[0].maxVersion = "'"${RHOAI_VERSION}"'"
 		' "$SYNC_OP_VARS"
 	fi
 	if [[ -n "$RHOAI_CHANNEL" ]]; then
 		echo "      Patching RHOAI channel → ${RHOAI_CHANNEL}"
-		yq -i '
+		yq -yi '
 			.catalogs_to_sync[0].packages[0].defaultChannel = "'"${RHOAI_CHANNEL}"'" |
 			.catalogs_to_sync[0].packages[0].channels[0].name = "'"${RHOAI_CHANNEL}"'"
 		' "$SYNC_OP_VARS"
@@ -229,6 +232,10 @@ INVENTORY="ansible/inventory/${CLOUD_ID}.local"
 mkdir -p "$LOGS_DIR"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
+LOG_DEPLOY="${LOGS_DIR}/${CLOUD_ID}-deploy-${TIMESTAMP}.log"
+exec > >(tee "$LOG_DEPLOY") 2>&1
+echo "Deploy log: ${LOG_DEPLOY}"
+
 ################################################################################
 # Step 1: Bootstrap venv
 ################################################################################
@@ -278,6 +285,12 @@ fi
 ################################################################################
 if ! should_skip 3 "Setup bastion (registry, DNS, Assisted Installer)"; then
 	echo "==> [3/6] Setup bastion (registry, DNS, Assisted Installer)"
+	# Force-remove AI service containers before setup so they are always recreated
+	# with the current onprem-environment (state: started won't restart running containers).
+	# Safe on first run - no-op if containers don't exist yet.
+	ansible -i "$INVENTORY" bastion -m shell -a \
+		"podman container stop service image-service 2>/dev/null; podman container rm service image-service 2>/dev/null; true" \
+		|| true
 	ansible-playbook -i "$INVENTORY" ansible/setup-bastion.yml
 fi
 
@@ -300,6 +313,14 @@ if ! should_skip 5 "Sync operator index + additional images to bastion registry"
 	LOG_SYNC_OP="${LOGS_DIR}/${CLOUD_ID}-sync-operators-${TIMESTAMP}.log"
 	ansible-playbook -i "$INVENTORY" ansible/sync-operator-index.yml 2>&1 | tee "$LOG_SYNC_OP"
 	touch "$MARKER_SYNC_OP"
+
+	# Overwrite the deploy-log with the oc mirror internal log (more meaningful than ansible output)
+	OPERATOR_INDEX_NAME=$(grep -m1 '^operator_index_name:' "$SYNC_OP_VARS" 2>/dev/null \
+		| awk '{print $2}' | tr -d '"' || true)
+	[[ -z "${OPERATOR_INDEX_NAME:-}" ]] && OPERATOR_INDEX_NAME="redhat-operator-index"
+	OC_MIRROR_LOG=$(ls -t "/opt/registry/sync/operators/${OPERATOR_INDEX_NAME}/working-dir/logs"/oc-mirror-*.log 2>/dev/null | head -1 || true)
+	[[ -n "${OC_MIRROR_LOG:-}" ]] && cp "$OC_MIRROR_LOG" "$LOG_SYNC_OP"
+
 	print_sync_summary "$LOG_SYNC_OP" "Operator index"
 fi
 

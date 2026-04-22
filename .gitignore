@@ -21,3 +21,8 @@ gen
 scripts/self-sched-deploy/vars/config.env
 scripts/self-sched-deploy/vars/state.env
 scripts/self-sched-deploy/repos/
+
+# deploy.sh runtime artifacts
+.sync-*-done
+deploy-logs/
+nodes-override.json

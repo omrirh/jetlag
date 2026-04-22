@@ -29,6 +29,7 @@
     force_basic_auth: yes
     user: "{{ hostvars[item]['bmc_user'] }}"
     password: "{{ hostvars[item]['bmc_password'] }}"
+    force_basic_auth: true
     method: Get
     headers:
       content-type: application/json
@@ -52,6 +53,7 @@
       force_basic_auth: yes
       user: "{{ hostvars[item]['bmc_user'] }}"
       password: "{{ hostvars[item]['bmc_password'] }}"
+      force_basic_auth: true
       method: POST
       headers:
         content-type: application/json
@@ -107,6 +109,7 @@
     force_basic_auth: yes
     user: "{{ hostvars[item]['bmc_user'] }}"
     password: "{{ hostvars[item]['bmc_password'] }}"
+    force_basic_auth: true
     method: POST
     headers:
       content-type: application/json
