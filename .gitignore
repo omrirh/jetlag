@@ -26,3 +26,4 @@ scripts/self-sched-deploy/repos/
 .sync-*-done
 deploy-logs/
 nodes-override.json
+ansible/vars/hw-config.yml

@@ -27,7 +27,9 @@ RHOAI_VERSION=""
 RHOAI_CHANNEL=""
 NODES_OVERRIDE=""
 RESUME=false
+REFRESH_NODES=false
 
+HW_CONFIG="ansible/vars/hw-config.yml"
 ALL_VARS="ansible/vars/all.yml"
 SYNC_OCP_VARS="ansible/vars/sync-ocp-release.yml"
 SYNC_OP_VARS="ansible/vars/sync-operator-index.yml"
@@ -54,7 +56,10 @@ Options:
   --rhoai-fbc-image URL     RHOAI FBC image to mirror as an additional image
   --rhoai-version VERSION   RHOAI operator version (e.g. 3.4.0-ea.2)
   --rhoai-channel CHANNEL   RHOAI operator channel (e.g. beta)
-  --nodes-override FILE     Path to custom ocpinventory.json for node role assignment
+  --nodes-override FILE     Path to custom ocpinventory.json; skips node refresh
+  --refresh-nodes           Refresh nodes-override.json from QUADS + Redfish before
+                            deployment (picks up MAC or cabling changes). Requires
+                            ansible/vars/hw-config.yml — run --init first if missing.
   --resume                  Auto-detect completed steps and skip them
   -h, --help                Show this help
 
@@ -65,6 +70,10 @@ Steps:
   4  Sync OCP release images to bastion registry
   5  Sync operator index + additional images to bastion registry
   6  Deploy MNO cluster
+
+  Node refresh (run when hardware changes — NIC swap, firmware update, re-cabling):
+    python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>  # first-time
+    ./deploy.sh <cloud-id> --refresh-nodes                                 # on deploy
 
 Logs from sync steps are written to: ./${LOGS_DIR}/
 
@@ -217,6 +226,7 @@ while [[ $# -gt 0 ]]; do
 	--rhoai-version)   RHOAI_VERSION="$2";   shift 2 ;;
 	--rhoai-channel)   RHOAI_CHANNEL="$2";   shift 2 ;;
 	--nodes-override)  NODES_OVERRIDE="$2";  shift 2 ;;
+	--refresh-nodes)   REFRESH_NODES=true; shift ;;
 	--resume)          RESUME=true; shift ;;
 	-h|--help) usage ;;
 	*) die "Unknown argument: $1" ;;
@@ -248,6 +258,27 @@ if ! should_skip 1 "Bootstrap ansible virtual environment"; then
 	fi
 else
 	[[ -f .ansible/bin/activate ]] && source .ansible/bin/activate
+fi
+
+################################################################################
+# Step 1b: Refresh nodes-override.json (opt-in via --refresh-nodes)
+################################################################################
+if $REFRESH_NODES && [[ -z "$NODES_OVERRIDE" ]]; then
+	echo "==> [1b] Refresh nodes-override.json from QUADS + Redfish"
+	if [[ ! -f "$HW_CONFIG" ]]; then
+		echo "      hw-config.yml not found — running --init to bootstrap it ..."
+		python3 scripts/generate-nodes-override.py --init --cloud "${CLOUD_ID}" --hw-config "${HW_CONFIG}"
+		echo "      Review ${HW_CONFIG} and re-run if the detected roles or adapters need adjustment."
+	fi
+	python3 scripts/generate-nodes-override.py \
+		--cloud "${CLOUD_ID}" \
+		--hw-config "${HW_CONFIG}" \
+		--output nodes-override.json
+	if grep -q '^ocp_inventory_override:' "$ALL_VARS"; then
+		sed -i "s|^ocp_inventory_override:.*$|ocp_inventory_override: $(pwd)/nodes-override.json|" "$ALL_VARS"
+	else
+		echo "ocp_inventory_override: $(pwd)/nodes-override.json" >> "$ALL_VARS"
+	fi
 fi
 
 ################################################################################
