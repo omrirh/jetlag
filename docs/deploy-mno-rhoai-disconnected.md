@@ -1,4 +1,4 @@
-# Disconnected RHOAI / llm-d Deployment on Performance Lab
+# Disconnected OCP for RHOAI / llm-d Deployment on Performance Lab
 
 This document describes how this Jetlag fork is adapted for deploying a **disconnected bare-metal OpenShift cluster on Performance Lab** to run **Red Hat OpenShift AI (RHOAI) with llm-d 3.4** as part of the OpenShift AI test suite.
 
@@ -48,11 +48,11 @@ Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
 ## Prerequisites
 
-Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, pull-secret, bootstrap venv).
+Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, pull-secret).
 
 ### Required Auth Tokens
 
-The disconnected mirroring steps pull from several registries. Your `pull-secret.txt` must include valid credentials for each. See [deploy-mno-performancelab.md — Bastion setup](deploy-mno-performancelab.md#bastion-setup) for how to download your pull secret.
+The disconnected mirroring steps pull from several registries. Your `pull-secret.txt` must include valid credentials for some of them. See [deploy-mno-performancelab.md — Bastion setup](deploy-mno-performancelab.md#bastion-setup) for how to download your pull secret.
 
 | Registry | Used for | How to obtain |
 |----------|----------|---------------|
@@ -98,11 +98,13 @@ Specifies RHOAI operator and dependency images to mirror. This file contains thr
 - Support per-catalog `target_catalog` destination (allows RHOAI FBC to land in its own index namespace)
 - Make `minVersion`/`maxVersion` optional per channel (standard Jetlag requires them)
 
+*Note: These Template customization changes might be suggested upstream in a future PR*
+
 ---
 
 ## Node Ordering Problem & Override Mechanism
 
-Performance Lab allocations do not guarantee node ordering. The bastion is always `nodes[0]` in the allocation JSON, but GPU nodes (intended as workers) may appear early in the list, displacing control-plane nodes.
+Performance Lab allocations do not guarantee desired node ordering. For instance, the bastion is always `nodes[0]` in the allocation JSON, but GPU nodes (intended as workers) may appear early in the list, displacing control-plane nodes.
 
 **Jetlag's built-in override mechanism** handles this via the `ocp_inventory_override` variable in `all.yml`:
 
@@ -185,7 +187,7 @@ After each sync step (`4` and `5`), `deploy.sh` prints a summary of image pull r
   Full log: ./deploy-logs/cloud02-sync-operators-20250415-120000.log
 ```
 
-Full logs for each run are saved under `./deploy-logs/` with a timestamped filename. Different failure categories reflect different root causes (e.g., `manifest-unknown` typically means the image digest or tag doesn't exist in the source registry; `unauthorized` indicates missing or expired auth tokens for that registry). Inspect the full log to see which specific images failed.
+Full logs for each run are saved under `./deploy-logs/` with a timestamped filename.
 
 ---
 
