@@ -43,3 +43,5 @@
     when: setup_hv_metrics | default(false) | bool
   - role: bastion-minio
     when: setup_bastion_minio | default(false)
+  - role: bastion-rhoai-services
+    when: setup_bastion_rhoai_services | default(false) | bool

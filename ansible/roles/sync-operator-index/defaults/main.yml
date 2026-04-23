@@ -102,5 +102,9 @@ catalogs_to_sync:
 additional_images: []
 extra_images: []
 
+# When true, writes a registries.conf.d entry that mirrors registry.redhat.io/rhoai → quay.io/rhoai.
+# Required for oc-mirror to resolve RHOAI images pulled via the FBC fragment catalog.
+sync_rhoai_registries_conf: false
+
 image_tag_mirrors: []
 image_digest_mirrors: []

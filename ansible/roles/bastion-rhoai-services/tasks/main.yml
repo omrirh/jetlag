@@ -1,0 +1,122 @@
+---
+#################################
+############# Minio #############
+#################################
+- name: Minio - Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ minio_config_dir }}"
+    - "{{ minio_config_dir }}/certs"
+    - "{{ minio_data_dir }}"
+
+- name: Minio - Create TLS certificate
+  shell: |
+    hostname=$(hostname)
+    openssl req -newkey rsa:4096 -nodes -sha256 \
+      -keyout {{ minio_config_dir }}/certs/private.key \
+      -x509 -days 365 \
+      -out {{ minio_config_dir }}/certs/public.crt \
+      -subj "/CN=${hostname}" \
+      -addext "subjectAltName = DNS:${hostname}"
+    cp {{ minio_config_dir }}/certs/public.crt /etc/pki/ca-trust/source/anchors/minio.crt
+    update-ca-trust
+  args:
+    creates: "{{ minio_config_dir }}/certs/public.crt"
+
+- name: Minio - Pull and start container
+  containers.podman.podman_container:
+    name: minio
+    image: "{{ minio_image }}"
+    state: started
+    recreate: true
+    command: server /data --certs-dir /certs --console-address :{{ minio_port_console }}
+    published_ports:
+      - "{{ minio_port_api }}:9000"
+      - "{{ minio_port_console }}:{{ minio_port_console }}"
+    env:
+      MINIO_ROOT_USER: "{{ minio_username }}"
+      MINIO_ROOT_PASSWORD: "{{ minio_password }}"
+    volume:
+      - "{{ minio_data_dir }}:/data:Z"
+      - "{{ minio_config_dir }}/certs:/certs:Z"
+
+- name: Minio - Wait for service to be ready
+  wait_for:
+    host: "{{ inventory_hostname }}"
+    port: "{{ minio_port_api }}"
+    timeout: 60
+
+#################################
+######### PyPI Cache ############
+#################################
+- name: PyPI cache - Create directories
+  file:
+    path: /opt/pypi-cache
+    state: directory
+    mode: "0755"
+
+- name: PyPI cache - Pull and start container
+  containers.podman.podman_container:
+    name: pypi-cache
+    image: "{{ pypi_cache_image }}"
+    state: started
+    recreate: true
+    published_ports:
+      - "{{ pypi_cache_port }}:{{ pypi_cache_container_port }}"
+    env:
+      DEVPI_HOSTNAME: "{{ inventory_hostname }}"
+
+- name: PyPI cache - Enable linger for rootless persistence
+  # Required so container survives logout: https://github.com/containers/podman/blob/main/troubleshooting.md#21
+  shell: loginctl enable-linger
+
+- name: PyPI cache - Copy certificate from container
+  shell: podman cp pypi-cache:/etc/nginx/certs/cert.crt /opt/pypi-cache/devpi.crt
+  retries: 3
+  delay: 5
+  register: pypi_crt_result
+  until: pypi_crt_result.rc == 0
+
+#################################
+########### Git Cache ###########
+#################################
+- name: Git cache - Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    mode: "0755"
+  loop:
+    - "{{ git_cache_dir }}"
+    - "{{ git_cache_dir }}/certs"
+    - "{{ git_cache_dir }}/repos"
+
+- name: Git cache - Remove stale container if present
+  containers.podman.podman_container:
+    name: git-cache
+    state: absent
+
+- name: Git cache - Pull and start container
+  containers.podman.podman_container:
+    name: git-cache
+    image: "{{ git_cache_image }}"
+    state: started
+    published_ports:
+      - "{{ git_cache_port_http }}:8080"
+      - "{{ git_cache_port_https }}:8443"
+    volume:
+      - "{{ git_cache_dir }}/repos:/opt/app-root/src/git:Z"
+
+- name: Git cache - Enable linger for rootless persistence
+  shell: loginctl enable-linger
+
+- name: Git cache - Copy certificate from container
+  shell: podman cp git-cache:/etc/nginx/certs/cert.crt {{ git_cache_dir }}/certs/git.crt
+  retries: 3
+  delay: 5
+  register: git_crt_result
+  until: git_crt_result.rc == 0
+

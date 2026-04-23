@@ -10,6 +10,16 @@
   - "{{ sync_path }}/operators"
   - "{{ sync_path }}/operators/{{ operator_index_name }}"
 
+- name: Write rhoai registries.conf.d entry for oc-mirror registry resolution
+  copy:
+    dest: /etc/containers/registries.conf.d/rhoai.conf
+    content: |
+      [[registry]]
+      location="registry.redhat.io/rhoai"
+      [[registry.mirror]]
+      location="quay.io/rhoai"
+  when: sync_rhoai_registries_conf | bool
+
 - name: Create ImageSetConfiguration
   template:
     src: imagesetconf.yml.j2

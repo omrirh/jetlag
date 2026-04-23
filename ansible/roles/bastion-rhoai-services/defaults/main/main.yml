@@ -1,0 +1,22 @@
+---
+# bastion-rhoai-services default vars
+
+# Minio
+minio_image: quay.io/minio/minio:latest
+minio_username: minioadmin
+minio_password: minioadmin
+minio_data_dir: /opt/minio/data
+minio_config_dir: /opt/minio
+minio_port_api: 9000
+minio_port_console: 9001
+
+# PyPI cache (ods-ci-pypi-cache)
+pypi_cache_image: quay.io/modh/ods-ci-pypi-cache:latest
+pypi_cache_port: 9443
+pypi_cache_container_port: 8443
+
+# Git cache (ods-ci-git-cache)
+git_cache_image: quay.io/modh/ods-ci-git-cache:latest
+git_cache_dir: /opt/git-cache
+git_cache_port_http: 9080
+git_cache_port_https: 9081
