@@ -188,6 +188,22 @@
   loop: "{{ image_tag_mirrors | default([]) }}"
   when: use_bastion_registry | default(false)
 
+- name: Apply extra ImageDigestMirrorSets on bastion registry clusters
+  shell: |
+    cat <<EOF | KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f -
+    apiVersion: config.openshift.io/v1
+    kind: ImageDigestMirrorSet
+    metadata:
+      name: {{ item.dest | replace('/', '-') }}-mirror
+    spec:
+      imageDigestMirrors:
+      - mirrors:
+        - {{ registry_host }}:{{ registry_port }}/{{ item.dest }}
+        source: {{ item.source }}
+    EOF
+  loop: "{{ image_digest_mirrors | default([]) }}"
+  when: use_bastion_registry | default(false)
+
 - name: Check for generated multi-catalog catalog-sources.yaml
   stat:
     path: "{{ sync_path }}/operators/{{ operator_index_name }}/working-dir/cluster-resources/catalog-sources.yaml"

@@ -103,3 +103,4 @@ additional_images: []
 extra_images: []
 
 image_tag_mirrors: []
+image_digest_mirrors: []
