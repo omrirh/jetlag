@@ -7,8 +7,13 @@
 operator_index_name: redhat-operator-index
 operator_index_tag: v4.19
 
+# Optional: set target_catalog on each entry to mirror each catalog into a separate
+# path in the bastion registry. When set, a per-catalog CatalogSource is generated
+# automatically in working-dir/cluster-resources/catalog-sources.yaml instead of a
+# single merged CatalogSource. Omit target_catalog to use the legacy single-index mode.
 catalogs_to_sync:
 - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.19
+  target_catalog: redhat/redhat-operator-index
   packages:
   - name: advanced-cluster-management
     channels:
@@ -89,3 +94,18 @@ catalogs_to_sync:
 #   dest: openshift-kni/ztp-site-generator:v4.21.0-2
 # - src: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
 #   dest: minio/minio:RELEASE.2025-09-07T16-13-09Z
+
+# Redirect tag-based pulls to the bastion registry via ImageTagMirrorSet.
+# Applied by mno-post-cluster-install when use_bastion_registry is true.
+# image_tag_mirrors:
+# - source: quay.io/rhoai
+#   dest: rhoai
+
+# Redirect digest-based pulls to the bastion registry via ImageDigestMirrorSet.
+# Use this when oc-mirror does not cover a registry automatically (e.g. registry.redhat.io/rhoai).
+# Applied by mno-post-cluster-install when use_bastion_registry is true.
+# image_digest_mirrors:
+# - source: registry.redhat.io/rhoai
+#   dest: rhoai
+# - source: quay.io/modh
+#   dest: modh
