@@ -3,7 +3,7 @@
 #
 # Usage: ./deploy.sh <cloud-id> [OPTIONS]
 #   e.g. ./deploy.sh cloud02
-#        ./deploy.sh cloud02 --ocp-version 4.20.1 --rhoai-version 3.4.0-ea.2
+#        ./deploy.sh cloud02 --ocp-version 4.20.1 --rhoai-version 3.4.0-ea.2  # also should support FBC image
 #        ./deploy.sh cloud02 --nodes-override /path/to/nodes.json --resume
 #
 # Assumes:
@@ -34,6 +34,12 @@ ALL_VARS="ansible/vars/all.yml"
 SYNC_OCP_VARS="ansible/vars/sync-ocp-release.yml"
 SYNC_OP_VARS="ansible/vars/sync-operator-index.yml"
 
+DISCONNECTED_IMAGESET_REPO=""  # overridable via --imageset-repo; defaults to internal GitLab URL
+DISCONNECTED_IMAGESET_DIR="/tmp/disconnected-imageset"
+GO_YQ="/usr/local/bin/yq"
+# GITLAB_TOKEN must be set in the environment when cloning from gitlab.cee.redhat.com.
+# It is intentionally not a CLI flag to avoid the token appearing in shell history or ps output.
+
 MARKER_SYNC_OCP=".sync-ocp-done"
 MARKER_SYNC_OP=".sync-operators-done"
 
@@ -53,9 +59,11 @@ Options:
   --ocp-version VERSION     Override OCP version (e.g. 4.20.1, latest-4.20)
   --ocp-build BUILD         Override OCP build type (ga, dev, ci)
   --rhoai-catalog URL       RHOAI FBC fragment catalog URL (digest-pinned)
-  --rhoai-fbc-image URL     RHOAI FBC image to mirror as an additional image
-  --rhoai-version VERSION   RHOAI operator version (e.g. 3.4.0-ea.2)
-  --rhoai-channel CHANNEL   RHOAI operator channel (e.g. beta)
+  --rhoai-fbc-image URL     RHOAI FBC image; drives disconnected-imageset automation
+  --rhoai-version VERSION   RHOAI operator version override (e.g. 3.4.0-ea.2)
+  --rhoai-channel CHANNEL   RHOAI operator channel override (e.g. beta)
+  --imageset-repo URL       Override disconnected-imageset Git URL (default: internal GitLab).
+                            Set GITLAB_TOKEN env var for authentication when using the default URL.
   --nodes-override FILE     Path to custom ocpinventory.json; skips node refresh
   --refresh-nodes           Refresh nodes-override.json from QUADS + Redfish before
                             deployment (picks up MAC or cabling changes). Requires
@@ -172,6 +180,185 @@ patch_yaml_scalar() {
 	sed -i "s|^${key}:.*$|${key}: ${value}|" "$file"
 }
 
+clone_disconnected_imageset() {
+	local repo_url="${DISCONNECTED_IMAGESET_REPO}"
+
+	# Build the default internal GitLab URL, embedding GITLAB_TOKEN if set
+	if [[ -z "${repo_url}" ]]; then
+		local base_url="gitlab.cee.redhat.com/ods/disconnected-imageset.git"
+		if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+			repo_url="https://oauth2:${GITLAB_TOKEN}@${base_url}"
+		else
+			repo_url="https://${base_url}"
+			echo "      WARNING: GITLAB_TOKEN is not set — clone may fail if repo requires authentication"
+		fi
+	fi
+
+	if [[ -d "${DISCONNECTED_IMAGESET_DIR}/.git" ]]; then
+		echo "      disconnected-imageset: pulling latest..."
+		git -C "${DISCONNECTED_IMAGESET_DIR}" -c http.sslVerify=false pull --ff-only 2>/dev/null \
+			|| echo "      WARNING: could not pull disconnected-imageset, using cached clone"
+	else
+		echo "      Cloning disconnected-imageset..."
+		git -c http.sslVerify=false clone "${repo_url}" "${DISCONNECTED_IMAGESET_DIR}"
+	fi
+}
+
+# Maps an OLM version string to the matching imagesets/v2/rhoai-* directory.
+#   3.4.0-ea.2  →  rhoai-3.4.EA2
+#   3.3.1       →  rhoai-3.3.1.GA
+#   3.3.0       →  rhoai-3.3.GA
+find_rhoai_version_dir() {
+	local base_dir="${1}" olm_version="${2}"
+	local dir_name major minor patch ea_num
+
+	if [[ "${olm_version}" == *"-ea."* ]]; then
+		major=$(echo "${olm_version}" | awk -F'.' '{print $1}')
+		minor=$(echo "${olm_version}" | awk -F'.' '{print $2}')
+		ea_num=$(echo "${olm_version}" | sed 's/.*-ea\.//')
+		dir_name="rhoai-${major}.${minor}.EA${ea_num}"
+	else
+		major=$(echo "${olm_version}" | awk -F'.' '{print $1}')
+		minor=$(echo "${olm_version}" | awk -F'.' '{print $2}')
+		patch=$(echo "${olm_version}" | awk -F'.' '{print $3}')
+		if [[ -z "${patch}" || "${patch}" == "0" ]]; then
+			dir_name="rhoai-${major}.${minor}.GA"
+		else
+			dir_name="rhoai-${major}.${minor}.${patch}.GA"
+		fi
+	fi
+
+	local full_path="${base_dir}/imagesets/v2/${dir_name}"
+	[[ -d "${full_path}" ]] && echo "${full_path}" || echo ""
+}
+
+# Runs all disconnected-imageset generate scripts for the given FBC image + OCP version and
+# merges the results into sync-operator-index.yml:
+#   - additional_images: union of images from all four sources (rhoai-ci, rhoai-{version},
+#                        dependent-operators, custom-images), deduplicated
+#   - catalogs_to_sync[*].catalog: pinned to immutable digests from ocp-digests.yaml
+#     (redhat-operator-index and community-operator-index) via dependent-operators/generate.sh
+#   - RHOAI_CATALOG / RHOAI_VERSION / RHOAI_CHANNEL: auto-derived from the FBC image label
+#     unless already set via manual flags (patch_rhoai_vars applies those overrides after)
+populate_rhoai_images() {
+	local imagesets_dir="${DISCONNECTED_IMAGESET_DIR}/imagesets/v2"
+	local pull_secret="${SCRIPT_DIR}/pull-secret.txt"
+	local tmp_merged
+	tmp_merged=$(mktemp)
+
+	# Normalize OCP_VERSION for disconnected-imageset scripts: strip any leading qualifier
+	# (e.g. latest-4.19 → 4.19, ci-4.20.0-0.nightly-... → 4.20) so template lookup works
+	local ocp_ver_numeric
+	ocp_ver_numeric=$(echo "${OCP_VERSION}" | sed 's/^[a-z]*-//' | awk -F'.' '{print $1"."$2}')
+
+	clone_disconnected_imageset
+
+	# 1. rhoai-ci: inspect FBC image → catalog/channel/version + additional images
+	echo "      [imageset] rhoai-ci: inspecting FBC image ${RHOAI_FBC_IMAGE}..."
+	local rhoai_ci_dir="${imagesets_dir}/rhoai-ci"
+	(
+		export PATH="/usr/local/bin:${PATH}"
+		export FBC_IMAGE="${RHOAI_FBC_IMAGE}"
+		export AUTH_FILE="${pull_secret}"
+		cd "${DISCONNECTED_IMAGESET_DIR}"
+		bash "${rhoai_ci_dir}/generate.sh"
+	) >/dev/null
+	local rhoai_ci_isc="${rhoai_ci_dir}/isc.yaml"
+	[[ -z "${RHOAI_CATALOG}" ]] && \
+		RHOAI_CATALOG=$("${GO_YQ}" e '.mirror.operators[0].catalog' "${rhoai_ci_isc}")
+	[[ -z "${RHOAI_VERSION}" ]] && \
+		RHOAI_VERSION=$("${GO_YQ}" e '.mirror.operators[0].packages[0].channels[0].minVersion' "${rhoai_ci_isc}")
+	[[ -z "${RHOAI_CHANNEL}" ]] && \
+		RHOAI_CHANNEL=$("${GO_YQ}" e '.mirror.operators[0].packages[0].defaultChannel' "${rhoai_ci_isc}")
+	"${GO_YQ}" e '.mirror.additionalImages[].name' "${rhoai_ci_isc}" >> "${tmp_merged}"
+	echo "      [imageset] rhoai-ci: $("${GO_YQ}" e '.mirror.additionalImages | length' "${rhoai_ci_isc}") images (catalog=${RHOAI_CATALOG}, version=${RHOAI_VERSION}, channel=${RHOAI_CHANNEL})"
+
+	# 2. rhoai-{version}: version-specific workbench + framework images
+	if [[ -n "${RHOAI_VERSION}" && -n "${OCP_VERSION}" ]]; then
+		local version_dir
+		version_dir=$(find_rhoai_version_dir "${DISCONNECTED_IMAGESET_DIR}" "${RHOAI_VERSION}")
+		if [[ -n "${version_dir}" ]]; then
+			echo "      [imageset] rhoai-version: $(basename "${version_dir}")/generate.sh..."
+			(
+				export PATH="/usr/local/bin:${PATH}"
+				export OCP_VERSION="${ocp_ver_numeric}"
+				cd "${DISCONNECTED_IMAGESET_DIR}"
+				bash "${version_dir}/generate.sh"
+			) >/dev/null
+			"${GO_YQ}" e '.mirror.additionalImages[].name' "${version_dir}/isc.yaml" >> "${tmp_merged}"
+			echo "      [imageset] rhoai-version: $("${GO_YQ}" e '.mirror.additionalImages | length' "${version_dir}/isc.yaml") images"
+		else
+			echo "      [imageset] WARNING: no imagesets/v2 directory found for ${RHOAI_VERSION} — skipping version-specific images"
+		fi
+	fi
+
+	# 3. dependent-operators: OCP-version-pinned operator dependencies
+	#    Also extracts digest-pinned catalog URLs to replace the floating tags in catalogs_to_sync
+	if [[ -n "${OCP_VERSION}" ]]; then
+		echo "      [imageset] dependent-operators: OCP ${OCP_VERSION}..."
+		(
+			export PATH="/usr/local/bin:${PATH}"
+			export OCP_VERSION="${ocp_ver_numeric}"
+			cd "${DISCONNECTED_IMAGESET_DIR}"
+			bash "${imagesets_dir}/dependent-operators/generate.sh"
+		) >/dev/null
+		local dep_ops_isc="${imagesets_dir}/dependent-operators/isc.yaml"
+		"${GO_YQ}" e '.mirror.additionalImages[].name' "${dep_ops_isc}" >> "${tmp_merged}"
+		echo "      [imageset] dependent-operators: $("${GO_YQ}" e '.mirror.additionalImages | length' "${dep_ops_isc}") images"
+
+		# Pin redhat-operator-index and community-operator-index to immutable digests
+		local pinned_rh_catalog pinned_community_catalog
+		pinned_rh_catalog=$("${GO_YQ}" e \
+			'.mirror.operators[] | select(.catalog | test("redhat-operator-index")) | .catalog' \
+			"${dep_ops_isc}")
+		pinned_community_catalog=$("${GO_YQ}" e \
+			'.mirror.operators[] | select(.catalog | test("community-operator-index")) | .catalog' \
+			"${dep_ops_isc}")
+
+		if [[ -n "${pinned_rh_catalog}" && "${pinned_rh_catalog}" == *"@sha256:"* ]]; then
+			echo "      [imageset] pinning redhat-operator-index → ${pinned_rh_catalog}"
+			yq -yi \
+				'(.catalogs_to_sync[] | select(.target_catalog == "redhat/redhat-operator-index") | .catalog) = "'"${pinned_rh_catalog}"'"' \
+				"${SYNC_OP_VARS}"
+		fi
+		if [[ -n "${pinned_community_catalog}" && "${pinned_community_catalog}" == *"@sha256:"* ]]; then
+			echo "      [imageset] pinning community-operator-index → ${pinned_community_catalog}"
+			yq -yi \
+				'(.catalogs_to_sync[] | select(.target_catalog == "redhat/community-operator-index") | .catalog) = "'"${pinned_community_catalog}"'"' \
+				"${SYNC_OP_VARS}"
+		fi
+	else
+		echo "      [imageset] WARNING: --ocp-version not set — skipping dependent-operators and catalog digest pinning"
+	fi
+
+	# 4. custom-images: static test infrastructure images
+	echo "      [imageset] custom-images: static list..."
+	"${GO_YQ}" e '.mirror.additionalImages[].name' "${imagesets_dir}/custom-images/isc.yaml" >> "${tmp_merged}"
+	echo "      [imageset] custom-images: $("${GO_YQ}" e '.mirror.additionalImages | length' "${imagesets_dir}/custom-images/isc.yaml") images"
+
+	# Deduplicate
+	sort -u -o "${tmp_merged}" "${tmp_merged}"
+
+	# Warn about rate-limited registries
+	local rate_limited
+	rate_limited=$(grep -E '^(docker\.io/|ghcr\.io/|docker-registry1\.)' "${tmp_merged}" || true)
+	if [[ -n "${rate_limited}" ]]; then
+		echo "      [imageset] WARNING: images from rate-limited registries (docker.io/ghcr.io) — may hit pull quotas:"
+		echo "${rate_limited}" | sed 's/^/        /'
+	fi
+
+	# Merge into sync-operator-index.yml (union with existing additional_images)
+	local existing_images all_images images_json
+	existing_images=$(yq -r '.additional_images // [] | .[]' "${SYNC_OP_VARS}" 2>/dev/null || true)
+	all_images=$(printf "%s\n%s\n" "${existing_images}" "$(cat "${tmp_merged}")" \
+		| grep -v '^$' | sort -u)
+	images_json=$(echo "${all_images}" | jq -Rn '[inputs]')
+	yq -yi ".additional_images = ${images_json}" "${SYNC_OP_VARS}"
+
+	echo "      [imageset] merged $(echo "${all_images}" | grep -c .) total additional_images into ${SYNC_OP_VARS}"
+	rm -f "${tmp_merged}"
+}
+
 patch_rhoai_vars() {
 	if [[ -n "$RHOAI_CATALOG" ]]; then
 		echo "      Patching RHOAI catalog → ${RHOAI_CATALOG}"
@@ -221,10 +408,11 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--ocp-version)     OCP_VERSION="$2";     shift 2 ;;
 	--ocp-build)       OCP_BUILD="$2";       shift 2 ;;
-	--rhoai-catalog)   RHOAI_CATALOG="$2";   shift 2 ;;
-	--rhoai-fbc-image) RHOAI_FBC_IMAGE="$2"; shift 2 ;;
-	--rhoai-version)   RHOAI_VERSION="$2";   shift 2 ;;
-	--rhoai-channel)   RHOAI_CHANNEL="$2";   shift 2 ;;
+	--rhoai-catalog)   RHOAI_CATALOG="$2";              shift 2 ;;
+	--rhoai-fbc-image) RHOAI_FBC_IMAGE="$2";            shift 2 ;;
+	--rhoai-version)   RHOAI_VERSION="$2";              shift 2 ;;
+	--rhoai-channel)   RHOAI_CHANNEL="$2";              shift 2 ;;
+	--imageset-repo)   DISCONNECTED_IMAGESET_REPO="$2"; shift 2 ;;
 	--nodes-override)  NODES_OVERRIDE="$2";  shift 2 ;;
 	--refresh-nodes)   REFRESH_NODES=true; shift ;;
 	--resume)          RESUME=true; shift ;;
@@ -302,6 +490,10 @@ if ! should_skip 2 "Prepare vars and generate inventory for ${CLOUD_ID}"; then
 		echo "      ocp_build → ${OCP_BUILD}"
 	fi
 
+	if [[ -n "${RHOAI_FBC_IMAGE}" ]]; then
+		populate_rhoai_images
+	fi
+	# Apply any manual --rhoai-* flag overrides on top of values derived above
 	[[ -n "$RHOAI_CATALOG" || -n "$RHOAI_FBC_IMAGE" || -n "$RHOAI_VERSION" || -n "$RHOAI_CHANNEL" ]] \
 		&& patch_rhoai_vars
 
