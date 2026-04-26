@@ -59,9 +59,13 @@ Options:
   --ocp-version VERSION     Override OCP version (e.g. 4.20.1, latest-4.20)
   --ocp-build BUILD         Override OCP build type (ga, dev, ci)
   --rhoai-catalog URL       RHOAI FBC fragment catalog URL (digest-pinned)
-  --rhoai-fbc-image URL     RHOAI FBC image; drives disconnected-imageset automation
+  --rhoai-fbc-image URL     RHOAI FBC image; drives disconnected-imageset automation.
+                            Always pair with --rhoai-channel: the channel is auto-derived
+                            from the FBC image label but upstream logic may misclassify
+                            EA releases (e.g. 3.4.0-ea.2 → stable-3.x instead of beta).
   --rhoai-version VERSION   RHOAI operator version override (e.g. 3.4.0-ea.2)
-  --rhoai-channel CHANNEL   RHOAI operator channel override (e.g. beta)
+  --rhoai-channel CHANNEL   RHOAI operator channel (e.g. beta, stable-3.x). Required
+                            alongside --rhoai-fbc-image for EA/pre-GA releases.
   --imageset-repo URL       Override disconnected-imageset Git URL (default: internal GitLab).
                             Set GITLAB_TOKEN env var for authentication when using the default URL.
   --nodes-override FILE     Path to custom ocpinventory.json; skips node refresh
@@ -72,12 +76,16 @@ Options:
   -h, --help                Show this help
 
 Steps:
-  1  Bootstrap ansible virtual environment
-  2  Prepare vars and generate inventory for <cloud-id>
-  3  Setup bastion (registry, DNS, Assisted Installer)
-  4  Sync OCP release images to bastion registry
-  5  Sync operator index + additional images to bastion registry
-  6  Deploy MNO cluster
+  1    Bootstrap ansible virtual environment
+  2    Prepare vars and generate inventory for <cloud-id>
+  3    Setup bastion (registry, DNS, Assisted Installer)
+  4    Sync OCP release images to bastion registry
+  5    Sync operator index + additional images to bastion registry
+  6    Deploy MNO cluster
+  post Generate cluster artifacts under /root/mno/:
+         registry-ca-configmap.yaml  — CA ConfigMap for openshift-config namespace
+         image-config-patch.yaml     — patches image.config.openshift.io/cluster to trust
+                                       the bastion registry CA (MCO propagates to all nodes)
 
   Node refresh (run when hardware changes — NIC swap, firmware update, re-cabling):
     python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>  # first-time
@@ -268,8 +276,15 @@ populate_rhoai_images() {
 		RHOAI_CATALOG=$("${GO_YQ}" e '.mirror.operators[0].catalog' "${rhoai_ci_isc}")
 	[[ -z "${RHOAI_VERSION}" ]] && \
 		RHOAI_VERSION=$("${GO_YQ}" e '.mirror.operators[0].packages[0].channels[0].minVersion' "${rhoai_ci_isc}")
+	local channel_explicit="${RHOAI_CHANNEL}"  # non-empty only if --rhoai-channel was passed
 	[[ -z "${RHOAI_CHANNEL}" ]] && \
 		RHOAI_CHANNEL=$("${GO_YQ}" e '.mirror.operators[0].packages[0].defaultChannel' "${rhoai_ci_isc}")
+	# Warn when channel is auto-derived for an EA version: upstream get_rhoai_channel()
+	# truncates "3.4.0-ea.2" → "3.4" before the EA check, so it may return stable-3.x
+	# instead of beta. Caller should always pass --rhoai-channel for EA/pre-GA releases.
+	if [[ -z "${channel_explicit}" && -n "${RHOAI_VERSION}" && "${RHOAI_VERSION,,}" == *ea* ]]; then
+		echo "      [imageset] WARNING: channel auto-derived as '${RHOAI_CHANNEL}' for EA version ${RHOAI_VERSION} — this may be wrong. Pass --rhoai-channel explicitly (e.g. --rhoai-channel beta)."
+	fi
 	"${GO_YQ}" e '.mirror.additionalImages[].name' "${rhoai_ci_isc}" >> "${tmp_merged}"
 	echo "      [imageset] rhoai-ci: $("${GO_YQ}" e '.mirror.additionalImages | length' "${rhoai_ci_isc}") images (catalog=${RHOAI_CATALOG}, version=${RHOAI_VERSION}, channel=${RHOAI_CHANNEL})"
 
@@ -367,6 +382,16 @@ patch_rhoai_vars() {
 	if [[ -n "$RHOAI_FBC_IMAGE" ]]; then
 		echo "      Patching RHOAI FBC image → ${RHOAI_FBC_IMAGE}"
 		yq -yi '.additional_images += ["'"${RHOAI_FBC_IMAGE}"'"]' "$SYNC_OP_VARS"
+		# EA/pre-GA RHOAI images are published to quay.io/rhoai, not registry.redhat.io/rhoai.
+		# The registries.conf.d redirect is required for oc-mirror to resolve them.
+		yq -yi '.sync_rhoai_registries_conf = true' "$SYNC_OP_VARS"
+		echo "      sync_rhoai_registries_conf → true (required for RHOAI FBC image mirroring)"
+	fi
+	if [[ -n "$OCP_VERSION" ]]; then
+		local ocp_tag
+		ocp_tag="v$(echo "${OCP_VERSION}" | sed 's/^[a-z]*-//' | awk -F'.' '{print $1"."$2}')"
+		echo "      Patching operator_index_tag → ${ocp_tag}"
+		yq -yi ".operator_index_tag = \"${ocp_tag}\"" "$SYNC_OP_VARS"
 	fi
 	if [[ -n "$RHOAI_VERSION" ]]; then
 		echo "      Patching RHOAI version → ${RHOAI_VERSION}"
@@ -555,8 +580,79 @@ if ! should_skip 6 "Deploy MNO cluster"; then
 	ansible-playbook -i "$INVENTORY" ansible/mno-deploy.yml
 fi
 
+################################################################################
+# Post-deployment: generate cluster artifacts
+################################################################################
+echo "==> [post] Generating cluster artifacts"
+
+# Registry CA manifests — apply these after the cluster is up so RHOAI/cluster
+# components trust the bastion self-signed registry CA.
+# Set DSCI spec.trustedCABundle.managementState: Managed to inherit the cluster bundle.
+_bastion_fqdn=$(hostname -f)
+_ca_cert="/opt/registry/certs/domain.crt"
+_mno_dir="/root/mno"
+# OpenShift additionalTrustedCA key format: <hostname>..<port> with dots in hostname
+# replaced by .. (double-dot) per OCP convention, e.g. foo..bar..example..com..5000
+_registry_key="${_bastion_fqdn//./'..'}..5000"
+if [[ -f "${_ca_cert}" ]]; then
+	{
+		cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bastion-registry-ca
+  namespace: openshift-config
+data:
+  ${_registry_key}: |
+YAML
+		sed 's/^/    /' "${_ca_cert}"
+	} > "${_mno_dir}/registry-ca-configmap.yaml"
+
+	cat > "${_mno_dir}/image-config-patch.yaml" <<'YAML'
+spec:
+  additionalTrustedCA:
+    name: bastion-registry-ca
+YAML
+	echo "      Registry CA manifests → ${_mno_dir}/registry-ca-configmap.yaml"
+	echo "      Image config patch    → ${_mno_dir}/image-config-patch.yaml"
+else
+	echo "      WARNING: ${_ca_cert} not found — registry CA manifests not generated"
+fi
+
+# Apply IDMS/ITMS/CatalogSource — mirror redirects and OLM catalog pointer.
+# Must run after the cluster is up and after Step 5 has populated working-dir.
+_op_idx_name=$(grep -m1 '^operator_index_name:' "$SYNC_OP_VARS" 2>/dev/null \
+	| awk '{print $2}' | tr -d '"' || true)
+[[ -z "${_op_idx_name}" ]] && _op_idx_name="redhat-operator-index"
+_cluster_resources="/opt/registry/sync/operators/${_op_idx_name}/working-dir/cluster-resources"
+
+if [[ -f "${_mno_dir}/kubeconfig" && -d "${_cluster_resources}" ]]; then
+	export KUBECONFIG="${_mno_dir}/kubeconfig"
+	_applied=0
+	for _f in idms-oc-mirror.yaml itms-oc-mirror.yaml catalog-sources.yaml; do
+		if [[ -f "${_cluster_resources}/${_f}" ]]; then
+			oc apply -f "${_cluster_resources}/${_f}"
+			_applied=1
+		fi
+	done
+	if [[ "${_applied}" -eq 1 ]]; then
+		echo "      Waiting for MachineConfigPool rollout..."
+		oc wait mcp master worker --for condition=updated --timeout=600s || \
+			echo "      WARNING: MCP did not reach Updated within 600s — check 'oc get mcp'"
+	fi
+else
+	[[ ! -f "${_mno_dir}/kubeconfig" ]] && \
+		echo "      [post] Skipping mirror manifest apply — kubeconfig not found (cluster not yet deployed)"
+	[[ ! -d "${_cluster_resources}" ]] && \
+		echo "      [post] Skipping mirror manifest apply — ${_cluster_resources} not found (run Step 5 first)"
+fi
+
 echo ""
 echo "Deployment complete. Access the cluster from the bastion:"
 echo "  export KUBECONFIG=/root/mno/kubeconfig"
 echo "  oc get nodes"
 echo "  cat /root/mno/kubeadmin-password"
+echo ""
+echo "Apply registry CA trust (required before installing RHOAI):"
+echo "  oc apply -f /root/mno/registry-ca-configmap.yaml"
+echo "  oc patch image.config.openshift.io/cluster --type=merge --patch-file /root/mno/image-config-patch.yaml"

@@ -28,6 +28,7 @@
 - name: Mirror operator index images
   shell: |
     oc mirror --authfile {{ registry_path }}/pull-secret-bastion.txt -c {{ sync_path }}/operators/{{ operator_index_name }}/imagesetconf.yml --workspace file://{{ sync_path }}/operators/{{ operator_index_name }} docker://{{ registry_host }}:{{ registry_port }} --v2
+  ignore_errors: true
 
 - name: Preserve IDMS for this operator index tag
   ansible.builtin.copy:
@@ -70,10 +71,14 @@
   set_fact:
     catalog_source_defs: "{{ catalog_source_defs | default([]) + [new_entry] }}"
   vars:
+    # Filter to tags matching the current operator_index_tag prefix (e.g. v4.19) so re-syncs
+    # don't pick up stale tags from previous OCP-version runs. Fall back to tags[0] if none match.
+    matching_tags: "{{ item.json.tags | select('match', '^' + operator_index_tag) | list }}"
+    selected_tag: "{{ matching_tags[-1] if matching_tags | length > 0 else item.json.tags[0] }}"
     new_entry:
-      name: "{{ item.item.target_catalog | replace('/', '-') }}"
-      image: "{{ registry_host }}:{{ registry_port }}/{{ item.item.target_catalog }}:{{ item.json.tags[0] }}"
-      display_name: "{{ item.item.target_catalog | split('/') | last }}"
+      name: "{{ item.item.catalog_source_name | default(item.item.target_catalog | replace('/', '-')) }}"
+      image: "{{ registry_host }}:{{ registry_port }}/{{ item.item.target_catalog }}:{{ selected_tag }}"
+      display_name: "{{ item.item.catalog_source_name | default(item.item.target_catalog | split('/') | last) }}"
   loop: "{{ catalog_tag_query.results }}"
   when: catalog_tag_query is not skipped and catalog_tag_query.results is defined
 
