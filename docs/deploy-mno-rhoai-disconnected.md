@@ -1,11 +1,11 @@
 # Disconnected OCP for RHOAI / llm-d Deployment on Performance Lab
 
-This document describes how this Jetlag fork is adapted for deploying a **disconnected bare-metal OpenShift cluster on Performance Lab** to run **Red Hat OpenShift AI (RHOAI) with llm-d 3.4** as part of the OpenShift AI test suite.
+This document describes how this Jetlag fork is adapted for deploying a **disconnected bare-metal OpenShift cluster on Performance Lab** to run **Red Hat OpenShift AI (RHOAI) with llm-d** as part of the OpenShift AI test suite.
 
 > **Before reading this document**, familiarize yourself with the standard Performance Lab MNO deployment guide:
 > [docs/deploy-mno-performancelab.md](deploy-mno-performancelab.md)
 >
-> This document builds on that guide and only covers what is **specific to this use case**.
+> This document only covers what is **specific to this use case**.
 
 ---
 
@@ -13,12 +13,14 @@ This document describes how this Jetlag fork is adapted for deploying a **discon
 
 - [Architecture Overview](#architecture-overview)
 - [Prerequisites](#prerequisites)
-  - [Required Auth Tokens](#required-auth-tokens)
-- [Pre-configured Vars Files](#pre-configured-vars-files)
+- [Quick Start](#quick-start)
+- [Vars Files](#vars-files)
+- [RHOAI Image Automation](#rhoai-image-automation)
 - [Node & Hardware Configuration](#node--hardware-configuration)
 - [deploy.sh — End-to-End Entrypoint](#deploysh--end-to-end-entrypoint)
   - [Usage](#usage)
   - [CLI Arguments](#cli-arguments)
+  - [Steps](#steps)
   - [Resume Logic](#resume-logic)
   - [Image Sync Tracking](#image-sync-tracking)
 - [Known Limitations](#known-limitations)
@@ -32,15 +34,17 @@ Performance Lab Allocation
 │
 ├── Node 0 → Bastion host
 │   ├── Assisted Installer (port 8080)
-│   ├── Bastion registry (mirrors: OCP + RHOAI operator images)
-│   └── CoreDNS / dnsmasq
+│   ├── Bastion registry (port 5000 — mirrors OCP + RHOAI operator images)
+│   ├── Minio object store (ports 9000/9001)
+│   ├── PyPI cache (port 9443)
+│   └── Git cache (ports 9080/9081)
 │
 ├── Nodes 1–3 → OpenShift control-plane (masters)
 │
 └── Nodes 4+ → OpenShift workers (GPU-capable for llm-d)
 ```
 
-The cluster is deployed **fully disconnected**: all OCP release images and RHOAI operator images are mirrored into the bastion registry before cluster installation begins. After Jetlag finishes, our Jenkins automation installs RHOAI and runs the llm-d test suite.
+The cluster is deployed **fully disconnected**: all OCP release images and RHOAI operator images are mirrored into the bastion registry before cluster installation begins. After Jetlag finishes, Jenkins installs RHOAI and runs the llm-d test suite.
 
 Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
@@ -48,78 +52,126 @@ Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
 ## Prerequisites
 
-Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, pull-secret).
+Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, obtain pull-secret).
 
-### Required Auth Tokens
+### Required credentials
 
-The disconnected mirroring steps pull from several registries. Your `pull-secret.txt` must include valid credentials for some of them. See [deploy-mno-performancelab.md — Bastion setup](deploy-mno-performancelab.md#bastion-setup) for how to download your pull secret.
-
-| Registry | Used for | How to obtain |
-|----------|----------|---------------|
-| `registry.redhat.io` | OCP release images, RHOAI dependency operators | Red Hat account token from [console.redhat.com/openshift/downloads](https://console.redhat.com/openshift/downloads) |
-| `quay.io` | Additional images (MinIO, test images, etc.) | Quay.io account token, same pull-secret download |
-| `quay.io/rhoai` | RHOAI FBC fragment catalog image | Private registry — requires a separate RHOAI-specific token; contact the RHOAI team |
+| Credential | Used for | How to obtain |
+|------------|----------|---------------|
+| `pull-secret.txt` | Pulling from `registry.redhat.io` and `quay.io` | Download from [console.redhat.com/openshift/downloads](https://console.redhat.com/openshift/downloads) |
+| `GITLAB_TOKEN` env var | Cloning `disconnected-imageset` repo at deploy time | Internal GitLab token with read access |
+| `quay.io/rhoai` access | RHOAI FBC fragment image | Private registry — requires a RHOAI-specific token; contact the RHOAI team |
 
 ---
 
-## Pre-configured Vars Files
+## Quick Start
 
-Three vars files ship pre-configured for this use case. They are located in `ansible/vars/` and are consumed directly by Jetlag's Ansible roles.
+```bash
+# 1. Clone the repo and place your pull secret
+git clone <this-repo> jetlag && cd jetlag
+cp /path/to/pull-secret.txt .
 
-### `ansible/vars/all.yml`
+# 2. Create the vars file from the RHOAI-specific template
+cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml
+# Edit all.yml: set lab_cloud (e.g. cloud02) and worker_node_count
 
-Defines infra-level params: lab type, cluster topology, OCP version, and disconnected registry settings.
+# 3. First-time hardware detection (generates hw-config.yml and nodes-override.json)
+python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>
 
-Key settings already configured for this use case:
-- `lab: performancelab`
-- `cluster_type: mno`
-- `worker_node_count: 2`
-- `setup_bastion_registry: true` / `use_bastion_registry: true` (disconnected mode)
+# 4. Deploy
+export GITLAB_TOKEN=<your-token>
+./deploy.sh <cloud-id> \
+  --ocp-version latest-4.19 \
+  --ocp-build ga \
+  --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:<digest>
+```
 
-See [all.yml](../ansible/vars/all.yml) and the [standard guide](deploy-mno-performancelab.md#configure-ansible-vars-in-allyml) for full variable reference.
+---
 
-### `ansible/vars/sync-ocp-release.yml`
+## Vars Files
 
-Specifies the OCP release images to mirror to the bastion registry. Controlled via `ocp_build` and `ocp_version`.
+### `ansible/vars/all.yml` (gitignored — create from sample)
 
-See [tips-and-vars.md — OCP Version](tips-and-vars.md) for version string formats.
+Contains infra-level params: lab type, cloud allocation, cluster topology, OCP version, and registry flags. It is **not tracked in git** because it holds environment-specific values.
 
-### `ansible/vars/sync-operator-index.yml`
+Create it from the pre-filled RHOAI template:
 
-Specifies RHOAI operator and dependency images to mirror. This file contains three catalog sources:
+```bash
+cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml
+```
 
-| Catalog | Purpose |
-|---------|---------|
-| `quay.io/rhoai/rhoai-fbc-fragment@sha256:…` | RHOAI operator (FBC fragment, versioned by digest) |
-| `registry.redhat.io/redhat/redhat-operator-index:v4.20` | RHOAI dependencies (Pipelines, ServiceMesh, NFD, etc.) |
-| `registry.redhat.io/redhat/community-operator-index:v4.20` | MariaDB community operator |
+Then fill in the two required fields:
 
-**Template customization:** `ansible/roles/sync-operator-index/templates/imagesetconf.yml.j2` has been modified to:
-- Support per-catalog `target_catalog` destination (allows RHOAI FBC to land in its own index namespace)
-- Make `minVersion`/`maxVersion` optional per channel (standard Jetlag requires them)
+| Field | Description |
+|-------|-------------|
+| `lab_cloud` | Cloud allocation ID, e.g. `cloud02` |
+| `worker_node_count` | Number of bare metal worker nodes, e.g. `3` |
 
-*Note: These Template customization changes might be suggested upstream in a future PR*
+Key settings already pre-filled in the template:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `lab` | `performancelab` | Target lab |
+| `cluster_type` | `mno` | Multi-node OpenShift |
+| `setup_bastion_registry` | `true` | Required for disconnected mirroring |
+| `use_bastion_registry` | `true` | Routes cluster image pulls through bastion |
+| `setup_bastion_rhoai_services` | `true` | Enables Minio, PyPI cache, Git cache |
+
+### `ansible/vars/sync-ocp-release.yml` (gitignored — create manually)
+
+Specifies the OCP release images to mirror to the bastion registry. See [tips-and-vars.md](tips-and-vars.md) for version string formats. The `--ocp-version` and `--ocp-build` flags in `deploy.sh` patch this file at runtime.
+
+### `ansible/vars/sync-operator-index.yml` (gitignored — generated at deploy time)
+
+Specifies RHOAI operator and dependency images to mirror. This file is **generated and patched at deploy time** by `deploy.sh` when `--rhoai-fbc-image` is provided — do not edit it manually between runs.
+
+The starting template is `ansible/vars/sync-operator-index.sample.yml`, which ships pre-configured with three catalog sources:
+
+| Catalog | `target_catalog` in bastion | `CatalogSource` name | Purpose |
+|---------|-----------------------------|----------------------|---------|
+| `quay.io/rhoai/rhoai-fbc-fragment@sha256:…` | `rhoai/rhoai-operator-index` | *(per-cluster)* | RHOAI operator |
+| `registry.redhat.io/redhat/redhat-operator-index:v4.19` | `redhat/redhat-operator-index` | `redhat-operators` | RHOAI dependencies (ServiceMesh 3.x, Pipelines, NFD, etc.) |
+| `registry.redhat.io/redhat/community-operator-index:v4.19` | `redhat/community-operator-index` | `community-operators` | MariaDB |
+
+> **Why `catalog_source_name: redhat-operators`?** The RHOAI operator continuously reconciles its dependency subscriptions (e.g. `servicemeshoperator3`) and hardcodes `source: redhat-operators`. Any deviation reverts on the next reconcile cycle. The CatalogSource must carry that exact name.
+
+> **Why `minVersion: 3.1.0` for `servicemeshoperator3`?** The RHOAI operator sets `startingCSV: servicemeshoperator3.v3.1.0` in its managed subscription. Mirroring only newer versions causes `ConstraintsNotSatisfiable`.
+
+---
+
+## RHOAI Image Automation
+
+Passing `--rhoai-fbc-image` to `deploy.sh` triggers the full disconnected-imageset automation pipeline:
+
+1. **Clone `disconnected-imageset`** — authenticated via `GITLAB_TOKEN` env var. Use `--imageset-repo <url>` to override the default internal GitLab URL.
+2. **Pin catalog digests** — `catalogs_to_sync[].catalog` fields in `sync-operator-index.yml` are updated with `@sha256:` digests from `disconnected-imageset/resources/ocp-digests.yaml`, ensuring exact reproducibility.
+3. **Merge `additional_images`** — images from the following disconnected-imageset directories are merged into `sync-operator-index.yml`:
+   - `imagesets/v2/rhoai-ci/` — RHOAI CI infrastructure images
+   - `imagesets/v2/rhoai-<version>/` — workbench and framework images for the specific RHOAI release
+   - `imagesets/v2/dependent-operators/` — operator bundle images
+   - `imagesets/v2/custom-images/` — custom/test images
+4. **Set `operator_index_tag`** — derived from `--ocp-version` (e.g. `latest-4.19` → `v4.19`) so the tag filter for CatalogSource generation matches the mirrored content.
+5. **Enable `sync_rhoai_registries_conf`** — writes `/etc/containers/registries.conf.d/rhoai.conf` on the bastion so `oc-mirror` resolves `registry.redhat.io/rhoai → quay.io/rhoai`.
 
 ---
 
 ## Node & Hardware Configuration
 
-Performance Lab allocations do not guarantee desired node ordering. GPU nodes (intended as workers) may appear early in the QUADS allocation JSON, displacing control-plane nodes. Additionally, hardware interventions such as NIC firmware updates or re-cabling can silently change MAC addresses, causing the discovery ISO to configure the wrong network interface.
+Performance Lab allocations do not guarantee consistent node ordering. GPU nodes (intended as workers) may appear early in the QUADS allocation JSON, displacing control-plane nodes. Hardware interventions (NIC firmware updates, re-cabling) can silently change MAC addresses.
 
-Both problems are handled by a script-driven override mechanism backed by a hardware config file.
+Both problems are handled by a script-driven override mechanism.
 
-### How it works
+### `ansible/vars/hw-config.yml`
 
-**`ansible/vars/hw-config.yml`** declares the hardware profile of the allocation. It is auto-generated by `--init` (see below) and only needs manual updates when the allocation hardware profile changes:
+Auto-generated by `--init`. Declares the hardware profile of the allocation:
 
 ```yaml
-# ansible/vars/hw-config.yml
 bmc_user: quads
 bmc_password: xxxx
 
 hw_role_hint:
-  r740xd: controlplane  # nodes of this model → control-plane
-  r750: worker          # nodes of this model → worker
+  r740xd: controlplane   # nodes of this model → control-plane
+  r750: worker           # nodes of this model → worker
 
 hw_bastion_model: r740xd  # first node of this model → bastion
 
@@ -128,11 +180,9 @@ hw_controlplane_adapter:
   r750: NIC.Slot.3
 ```
 
-`hw_controlplane_adapter` is the Redfish adapter ID for the NIC physically cabled to the controlplane network. It is **auto-detected during `--init`** by selecting the highest-speed adapter on each node type — you do not need to determine this manually.
+### `scripts/generate-nodes-override.py`
 
-**`scripts/generate-nodes-override.py`** reads `hw-config.yml`, queries QUADS for the current allocation, then queries each node's iDRAC via Redfish for its live MAC addresses. It writes a correctly ordered `nodes-override.json` with the controlplane NIC MAC at `mac[0]` for each node.
-
-Node assignment in the generated file is positional, as required by Jetlag:
+Reads `hw-config.yml`, queries QUADS for the current allocation, then queries each node's iDRAC via Redfish for live MAC addresses. Writes a correctly ordered `nodes-override.json`:
 
 | Position | Role |
 |----------|------|
@@ -142,98 +192,88 @@ Node assignment in the generated file is positional, as required by Jetlag:
 
 ### First-time setup
 
-Run once when `hw-config.yml` does not yet exist, or when the hardware profile changes (new node models added to the allocation):
-
 ```bash
 python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>
 ```
 
-This queries QUADS and Redfish to auto-populate `hw-config.yml`. Review the generated file to confirm the detected roles and adapters look correct before committing it.
-
-### Normal deployment (no hardware changes)
-
-```bash
-./deploy.sh cloud02
-```
-
-`nodes-override.json` is used as-is. No Redfish queries are made.
+Queries QUADS and Redfish to auto-populate `hw-config.yml`. Review before running `deploy.sh`.
 
 ### Deployment after hardware changes
 
-Use `--refresh-nodes` after any hardware intervention (NIC firmware update, NIC swap, re-cabling):
-
 ```bash
-./deploy.sh cloud02 --refresh-nodes
+./deploy.sh <cloud-id> --refresh-nodes
 ```
 
-This re-queries Redfish for current MACs, re-applies node ordering from `hw-config.yml`, and rewrites `nodes-override.json` before the inventory step. If `hw-config.yml` does not exist, `--init` runs automatically.
-
-### Manual node order override
-
-If you need to adjust node ordering beyond what `hw-config.yml` can express, generate the baseline first and edit:
-
-```bash
-# 1. Generate the baseline from QUADS + Redfish
-python3 scripts/generate-nodes-override.py --cloud <cloud-id>
-
-# 2. Edit nodes-override.json — reorder the nodes array as needed
-
-# 3. Deploy using your edited file (skips auto-refresh to preserve your changes)
-./deploy.sh <cloud-id> --nodes-override /path/to/nodes-override.json
-```
-
-> `--nodes-override FILE` and `--refresh-nodes` are mutually exclusive. Passing `--nodes-override` always uses the provided file without querying Redfish.
-
-See [tips-and-vars.md — Override lab ocpinventory json file](tips-and-vars.md) for Jetlag's underlying override mechanism.
+Re-queries Redfish for current MACs and rewrites `nodes-override.json` before the inventory step.
 
 ---
 
 ## `deploy.sh` — End-to-End Entrypoint
 
-`deploy.sh` is the single entrypoint for Jenkins/TestOps CI automation. It runs all six deployment steps in sequence and patches vars files at runtime based on CLI arguments.
+`deploy.sh` is the single entrypoint for Jenkins/CI automation. It runs all six deployment steps in sequence and patches vars files at runtime based on CLI arguments.
 
 ### Usage
 
 ```bash
 ./deploy.sh <cloud-id> [OPTIONS]
 
-# Examples:
+# Minimal (vars already configured):
 ./deploy.sh cloud02
-./deploy.sh cloud02 --ocp-version 4.20.1 --rhoai-version 3.4.0-ea.2
-./deploy.sh cloud02 --nodes-override /path/to/nodes-override.json --resume
+
+# Full RHOAI disconnected deployment:
+export GITLAB_TOKEN=<token>
+./deploy.sh cloud02 \
+  --ocp-version latest-4.19 \
+  --ocp-build ga \
+  --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:<digest>
+
+# Resume after interruption:
+./deploy.sh cloud02 --resume
 ```
 
 ### CLI Arguments
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `<cloud-id>` | *(required)* | Performance Lab cloud allocation ID (e.g. `cloud02`) |
-| `--ocp-version VERSION` | value in `all.yml` | Override OCP version in both `all.yml` and `sync-ocp-release.yml` |
-| `--ocp-build BUILD` | value in `all.yml` | Override OCP build type (`ga`, `dev`, or `ci`) |
-| `--rhoai-catalog URL` | value in `sync-operator-index.yml` | RHOAI FBC fragment catalog URL (digest-pinned) |
-| `--rhoai-fbc-image URL` | *(unset)* | RHOAI FBC image to mirror as a standalone additional image |
-| `--rhoai-version VERSION` | value in `sync-operator-index.yml` | RHOAI operator version (e.g. `3.4.0-ea.2`) |
-| `--rhoai-channel CHANNEL` | value in `sync-operator-index.yml` | RHOAI operator channel (e.g. `beta`) |
-| `--nodes-override FILE` | *(unset)* | Use a specific `ocpinventory.json`; skips Redfish node refresh |
-| `--refresh-nodes` | *(off)* | Refresh `nodes-override.json` from QUADS + Redfish before deployment |
-| `--resume` | *(off)* | Auto-detect completed steps and skip them |
+| Argument | Description |
+|----------|-------------|
+| `<cloud-id>` | *(required)* Performance Lab cloud allocation ID, e.g. `cloud02` |
+| `--ocp-version VERSION` | OCP version string (e.g. `latest-4.19`, `4.19.1`). Patches `all.yml` and `sync-ocp-release.yml`. Also derives `operator_index_tag` for CatalogSource tag filtering. |
+| `--ocp-build BUILD` | OCP build type: `ga`, `dev`, or `ci`. Patches `all.yml`. |
+| `--rhoai-fbc-image URL` | RHOAI FBC image digest (e.g. `quay.io/rhoai/rhoai-fbc-fragment@sha256:…`). Triggers the full disconnected-imageset automation: catalog digest pinning, `additional_images` merge, `operator_index_tag` derivation, and `sync_rhoai_registries_conf`. Requires `GITLAB_TOKEN` env var. |
+| `--rhoai-channel CHANNEL` | RHOAI operator channel (e.g. `beta`). Use alongside `--rhoai-fbc-image` for EA/pre-GA releases where the channel cannot be auto-derived. |
+| `--rhoai-version VERSION` | RHOAI operator version (e.g. `3.4.0-ea.2`). |
+| `--imageset-repo URL` | Override the disconnected-imageset Git URL (default: internal GitLab). |
+| `--nodes-override FILE` | Use a specific `ocpinventory.json`; skips Redfish node refresh. |
+| `--refresh-nodes` | Refresh `nodes-override.json` from QUADS + Redfish before deployment. |
+| `--resume` | Auto-detect completed steps and skip them. |
+
+### Steps
+
+| Step | Description |
+|------|-------------|
+| 1 | Bootstrap Ansible virtual environment |
+| 2 | Patch vars files (`all.yml`, `sync-operator-index.yml`), generate Ansible inventory |
+| 3 | Setup bastion (registry, DNS, Assisted Installer, Minio/PyPI/Git cache if enabled) |
+| 4 | Sync OCP release images to bastion registry |
+| 5 | Sync operator index + additional images to bastion registry via `oc-mirror` |
+| 6 | Deploy MNO cluster via Assisted Installer |
+| post | Apply IDMS/ITMS/CatalogSource manifests from `oc-mirror` working-dir; wait for MachineConfigPool rollout; write registry CA manifests to `/root/mno/` |
 
 ### Resume Logic
 
-With `--resume`, `deploy.sh` checks markers before each step:
+With `--resume`, each step is skipped if its completion condition is already met:
 
-| Step | Skip Condition |
+| Step | Skip condition |
 |------|---------------|
 | 1 — Bootstrap venv | `.ansible/bin/activate` exists |
-| 2 — Prepare vars + generate inventory | `ansible/inventory/${CLOUD_ID}.local` exists |
+| 2 — Prepare vars + inventory | `ansible/inventory/${CLOUD_ID}.local` exists |
 | 3 — Setup bastion | Bastion registry responding on port 5000 |
-| 4 — Sync OCP release | `.sync-ocp-done` marker file present |
-| 5 — Sync operator index | `.sync-operators-done` marker file present |
+| 4 — Sync OCP release | `.sync-ocp-done` marker present |
+| 5 — Sync operator index | `.sync-operators-done` marker present |
 | 6 — Deploy cluster | `/root/mno/kubeconfig` exists |
 
 ### Image Sync Tracking
 
-After each sync step (`4` and `5`), `deploy.sh` prints a summary of image pull results parsed from the captured Ansible log. Errors are grouped by type:
+After each sync step, `deploy.sh` prints a grouped error summary parsed from the Ansible log:
 
 ```
   --- Operator index image sync summary ---
@@ -241,16 +281,15 @@ After each sync step (`4` and `5`), `deploy.sh` prints a summary of image pull r
   ----------             -----
   manifest-unknown       82
   unauthorized           11
-  bundle skipped         1
   Full log: ./deploy-logs/cloud02-sync-operators-20250415-120000.log
 ```
 
-Full logs for each run are saved under `./deploy-logs/` with a timestamped filename.
+Full logs are written to `./deploy-logs/` with a timestamped filename.
 
 ---
 
 ## Known Limitations
 
-1. **`odh-*` image pull failures**: Some `odh-*` pattern images in `sync-operator-index.yml` currently fail to pull. Root cause is under investigation. These failures cause `sync-operator-index.yml` to error out unless the problematic images are removed from `additional_images`.
+1. **`servicemeshoperator3.v3.1.0` must be in the mirrored catalog** — RHOAI operator hardcodes `startingCSV: servicemeshoperator3.v3.1.0` in its managed subscription and reverts any manual changes. The `sync-operator-index.sample.yml` includes `minVersion: 3.1.0` to ensure the v3.1.0 bundle is mirrored. If GatewayConfig is not ready after install, confirm `servicemeshoperator3` CSV is `Succeeded` in the `openshift-operators` namespace.
 
-2. **Node ordering in allocation**: GPU nodes intended as workers may appear early in the QUADS allocation JSON, causing them to be assigned as control-plane nodes. Use `--refresh-nodes` or the manual override flow described in [Node & Hardware Configuration](#node--hardware-configuration).
+2. **Node ordering in allocation** — GPU nodes intended as workers may appear early in the QUADS allocation JSON. Use `--refresh-nodes` or the manual override flow described in [Node & Hardware Configuration](#node--hardware-configuration).

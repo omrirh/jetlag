@@ -7,9 +7,10 @@
 #        ./deploy.sh cloud02 --nodes-override /path/to/nodes.json --resume
 #
 # Assumes:
-#   - ansible/vars/all.yml is configured (lab, cluster_type, registry flags, etc.)
+#   - ansible/vars/all.yml exists (copy from all.rhoai-disconnected-bm.sample.yml,
+#     then set lab_cloud and worker_node_count)
 #   - ansible/vars/sync-ocp-release.yml is configured
-#   - ansible/vars/sync-operator-index.yml is configured
+#   - ansible/vars/sync-operator-index.yml is populated by this script via --rhoai-fbc-image
 #   - pull-secret.txt is present at the repo root
 #   - Script is run from the repo root on the bastion machine
 
@@ -450,6 +451,11 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+[[ -f "$ALL_VARS" ]] || die "$(printf '%s\n%s\n%s' \
+	"ansible/vars/all.yml not found." \
+	"Create it from the RHOAI disconnected BM template:" \
+	"  cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml")"
 
 INVENTORY="ansible/inventory/${CLOUD_ID}.local"
 mkdir -p "$LOGS_DIR"

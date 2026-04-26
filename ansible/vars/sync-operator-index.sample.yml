@@ -1,92 +1,110 @@
 ---
-# Sample sync-operator-index vars file
+# sync-operator-index vars — RHOAI disconnected BM deployment
+#
+# This file is the template for ansible/vars/sync-operator-index.yml.
+# deploy.sh copies it (if absent) and then patches it at runtime:
+#   - operator_index_tag  ← derived from --ocp-version (e.g. v4.19)
+#   - catalogs_to_sync[].catalog digests ← pinned from disconnected-imageset ocp-digests.yaml
+#   - additional_images   ← populated from disconnected-imageset generate scripts
+#   - sync_rhoai_registries_conf ← set to true when --rhoai-fbc-image is provided
+#
+# Do not add images to additional_images manually — that list is overwritten by the automation.
 
-# Creates one index with operators from multiple container images
-
-# operator_index_name represents the destination operator index for the single catalog source (can contain images from multiple Red Hat provided operator catalogs eg.redhat-operators, certified-operators, based on the vars set below under operators_to_sync list)
-operator_index_name: redhat-operator-index
+operator_index_name: rhoai-operator-index
 operator_index_tag: v4.19
 
-# Optional: set target_catalog on each entry to mirror each catalog into a separate
-# path in the bastion registry. When set, a per-catalog CatalogSource is generated
-# automatically in working-dir/cluster-resources/catalog-sources.yaml instead of a
-# single merged CatalogSource. Omit target_catalog to use the legacy single-index mode.
-catalogs_to_sync:
-- catalog: registry.redhat.io/redhat/redhat-operator-index:v4.19
-  target_catalog: redhat/redhat-operator-index
-  packages:
-  - name: advanced-cluster-management
-    channels:
-    - name: release-2.14
-      minVersion: 2.14.0
-      maxVersion: 2.14.0
-  - name: amq-streams
-    defaultChannel: amq-streams-3.0.x
-    channels:
-    - name: amq-streams-2.9.x
-      minVersion: 2.9.2-1
-      maxVersion: 2.9.2-1
-    - name: amq-streams-3.0.x
-      minVersion: v3.0.1-2
-      maxVersion: v3.0.1-2
-  - name: ansible-automation-platform-operator
-    defaultChannel: stable-2.6-cluster-scoped
-    channels:
-    - name: stable-2.6-cluster-scoped
-      minVersion: 2.6.0+0.1759764962
-      maxVersion: 2.6.0+0.1759764962
-  - name: cluster-logging
-    defaultChannel: stable-6.2
-    channels:
-    - name: stable-6.2
-      minVersion: 6.2.5
-      maxVersion: 6.2.5
-  - name: lifecycle-agent
-    channels:
-    - name: stable
-      minVersion: 4.19.0
-      maxVersion: 4.19.0
-  - name: local-storage-operator
-    channels:
-    - name: stable
-      minVersion: 4.19.0-202509280154
-      maxVersion: 4.19.0-202509280154
-  - name: multicluster-engine
-    channels:
-    - name: stable-2.9
-      minVersion: 2.9.0
-      maxVersion: 2.9.0
-  - name: multicluster-global-hub-operator-rh
-    channels:
-    - name: release-1.5
-      minVersion: v1.5.1
-      maxVersion: v1.5.1
-  - name: openshift-gitops-operator
-    defaultChannel: gitops-1.18
-    channels:
-    - name: gitops-1.18
-      minVersion: 1.18.0
-      maxVersion: 1.18.0
-  - name: ptp-operator
-    channels:
-    - name: stable
-      minVersion: 4.19.0-202509280154
-      maxVersion: 4.19.0-202509280154
-  - name: redhat-oadp-operator
-    channels:
-    - name: stable
-      minVersion: 1.5.2
-      maxVersion: 1.5.2
-  - name: sriov-network-operator
-    channels:
-    - name: stable
-      minVersion: 4.19.0-202510010724
-      maxVersion: 4.19.0-202510010724
+# Required so oc-mirror resolves registry.redhat.io/rhoai → quay.io/rhoai.
+# Auto-set to true by deploy.sh when --rhoai-fbc-image is provided.
+sync_rhoai_registries_conf: true
 
-# Sync extra container images directly (without renaming) into the destination registry.
-# additional_images:
-# - quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-# - quay.io/namespace/image_name:example_tag
+# Redirect digest-based pulls to the bastion registry for namespaces not
+# covered automatically by oc-mirror.
+image_digest_mirrors:
+  - source: registry.redhat.io/rhoai
+    dest: rhoai
+  - source: quay.io/modh
+    dest: modh
+
+catalogs_to_sync:
+  # RHOAI FBC fragment — must match the --rhoai-fbc-image value passed to deploy.sh.
+  # The digest is pinned here for exact reproducibility; update when changing RHOAI version.
+  - catalog: quay.io/rhoai/rhoai-fbc-fragment@sha256:f7fe40ead9b1fca93b7626a3db97780577478379f1734d2f40a5ac24be233705
+    target_catalog: rhoai/rhoai-operator-index
+    packages:
+      - name: rhods-operator
+        defaultChannel: beta
+        channels:
+          - name: beta
+            minVersion: 3.4.0-ea.2
+            maxVersion: 3.4.0-ea.2
+
+  # Red Hat operator catalog — digest pinned at deploy time from disconnected-imageset ocp-digests.yaml.
+  # catalog_source_name must be redhat-operators: RHOAI operator hardcodes this name in its
+  # managed dependency subscriptions (e.g. servicemeshoperator3) and reverts any changes.
+  - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.19
+    target_catalog: redhat/redhat-operator-index
+    catalog_source_name: redhat-operators
+    packages:
+      - name: openshift-pipelines-operator-rh
+        defaultChannel: latest
+        channels:
+          - name: latest
+      - name: serverless-operator
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: servicemeshoperator
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: servicemeshoperator3
+        defaultChannel: stable
+        channels:
+          - name: stable
+            minVersion: 3.1.0
+            # RHOAI operator sets startingCSV: servicemeshoperator3.v3.1.0 in its managed
+            # subscription. Mirroring only newer versions causes ConstraintsNotSatisfiable.
+      - name: authorino-operator
+        defaultChannel: stable
+        channels:
+          - name: stable
+          - name: tech-preview-v1
+      - name: nfd
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: cluster-observability-operator
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: opentelemetry-product
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: tempo-product
+        defaultChannel: stable
+        channels:
+          - name: stable
+      - name: openshift-custom-metrics-autoscaler-operator
+        defaultChannel: stable
+        channels:
+          - name: stable
+
+  # Community operator catalog — digest pinned at deploy time from disconnected-imageset ocp-digests.yaml.
+  - catalog: registry.redhat.io/redhat/community-operator-index:v4.19
+    target_catalog: redhat/community-operator-index
+    catalog_source_name: community-operators
+    packages:
+      - name: mariadb-operator
+        defaultChannel: alpha
+        channels:
+          - name: alpha
+            minVersion: 25.8.2
+            maxVersion: 25.8.2
+
+# Populated at deploy time by deploy.sh populate_rhoai_images().
+# Do not edit — overwritten on each deploy.sh run with --rhoai-fbc-image.
+additional_images: []
 
 # Sync extra container images directly with oc image mirror, allowing destination renaming.
 # extra_images:

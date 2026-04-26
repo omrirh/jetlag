@@ -1,0 +1,68 @@
+---
+# Pre-filled vars template for RHOAI disconnected MNO deployment on Performance Lab.
+# Copy to ansible/vars/all.yml and set lab_cloud + worker_node_count before running.
+#
+# Usage:
+#   cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml
+#   # Edit lab_cloud and worker_node_count for your allocation
+#   export GITLAB_TOKEN=<token>
+#   ./deploy.sh <cloud-id> \
+#     --ocp-version latest-4.19 \
+#     --ocp-build ga \
+#     --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:f7fe40ead9b1fca93b7626a3db97780577478379f1734d2f40a5ac24be233705
+
+################################################################################
+# Lab & cluster infrastructure vars
+################################################################################
+lab: performancelab
+lab_cloud:           # Required: set to your cloud allocation, e.g. cloud02
+
+cluster_type: mno
+worker_node_count:   # Required: number of bare metal worker nodes, e.g. 3
+
+ocp_build: ga
+ocp_version: latest-4.19
+
+public_vlan: false
+sno_use_lab_dhcp: false
+
+enable_fips: false
+enable_techpreview: false
+enable_cnv_install: false
+
+ssh_private_key_file: ~/.ssh/id_rsa
+ssh_public_key_file: ~/.ssh/id_rsa.pub
+pull_secret: "{{ lookup('file', '../pull-secret.txt') }}"
+
+################################################################################
+# Bastion node vars
+################################################################################
+bastion_cluster_config_dir: /root/{{ cluster_type }}
+
+smcipmitool_url:
+
+# Interface names are auto-configured from hardware MAC addresses by
+# generate-nodes-override.py. Override only if auto-detection fails:
+# bastion_lab_interface: eno1np0
+# bastion_controlplane_interface: ens1f0
+
+setup_bastion_gogs: false
+
+# Disconnected deployment: mirror images to bastion and route cluster pulls through it
+setup_bastion_registry: true
+use_bastion_registry: true
+
+setup_bastion_proxy: false
+
+# Enable Minio (9000/9001), PyPI cache (9443), and Git cache (9080/9081) on the bastion
+setup_bastion_rhoai_services: true
+
+################################################################################
+# OCP node vars
+################################################################################
+enable_bond: false
+
+################################################################################
+# Extra vars
+################################################################################
+# Append override vars below
