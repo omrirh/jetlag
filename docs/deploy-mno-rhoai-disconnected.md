@@ -17,12 +17,13 @@ This document describes how this Jetlag fork is adapted for deploying a **discon
 - [Vars Files](#vars-files)
 - [RHOAI Image Automation](#rhoai-image-automation)
 - [Node & Hardware Configuration](#node--hardware-configuration)
-- [deploy.sh — End-to-End Entrypoint](#deploysh--end-to-end-entrypoint)
+- [deploy\_rhoai\_bm.sh — End-to-End Entrypoint](#deploy_rhoai_bmsh--end-to-end-entrypoint)
   - [Usage](#usage)
   - [CLI Arguments](#cli-arguments)
   - [Steps](#steps)
   - [Resume Logic](#resume-logic)
   - [Image Sync Tracking](#image-sync-tracking)
+  - [Deployment Outputs](#deployment-outputs)
 - [Known Limitations](#known-limitations)
 
 ---
@@ -37,7 +38,8 @@ Performance Lab Allocation
 │   ├── Bastion registry (port 5000 — mirrors OCP + RHOAI operator images)
 │   ├── Minio object store (ports 9000/9001)
 │   ├── PyPI cache (port 9443)
-│   └── Git cache (ports 9080/9081)
+│   ├── Git cache (ports 9080/9081)
+│   └── NFS server (port 2049 — PersistentVolume backing for RHOAI)
 │
 ├── Nodes 1–3 → OpenShift control-plane (masters)
 │
@@ -59,8 +61,27 @@ Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup
 | Credential | Used for | How to obtain |
 |------------|----------|---------------|
 | `pull-secret.txt` | Pulling from `registry.redhat.io` and `quay.io` | Download from [console.redhat.com/openshift/downloads](https://console.redhat.com/openshift/downloads) |
-| `GITLAB_TOKEN` env var | Cloning `disconnected-imageset` repo at deploy time | Internal GitLab token with read access |
+| `GITLAB_TOKEN` env var | Cloning `disconnected-imageset` and `disconnected-s3` repos at deploy time | Internal GitLab token with read access |
 | `quay.io/rhoai` access | RHOAI FBC fragment image | Private registry — requires a RHOAI-specific token; contact the RHOAI team |
+| AWS credentials | S3 → Minio mirroring (`--s3-mirror-config`) | AWS IAM credentials with S3 read access |
+
+### `credentials.env`
+
+Create this file from the shipped example before running `deploy_rhoai_bm.sh`:
+
+```bash
+cp credentials.env.example credentials.env
+# Edit credentials.env and fill in the values for your environment
+```
+
+`credentials.env` is **gitignored** and must never be committed. `deploy_rhoai_bm.sh` sources it automatically at startup so credentials are never passed as CLI flags or written to shell history.
+
+| Variable | Required for |
+|----------|-------------|
+| `GITLAB_TOKEN` | Cloning internal GitLab repos (`disconnected-imageset`, `disconnected-s3`) |
+| `AWS_ACCESS_KEY_ID` | S3 → Minio mirroring (`--s3-mirror-config`) |
+| `AWS_SECRET_ACCESS_KEY` | S3 → Minio mirroring (`--s3-mirror-config`) |
+| `AWS_S3_URL` | S3 source endpoint (default: `https://s3.amazonaws.com`) |
 
 ---
 
@@ -79,8 +100,8 @@ cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml
 python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>
 
 # 4. Deploy
-export GITLAB_TOKEN=<your-token>
-./deploy.sh <cloud-id> \
+# Credentials are read from credentials.env — no env-var export needed at the shell
+./deploy_rhoai_bm.sh <cloud-id> \
   --ocp-version latest-4.19 \
   --ocp-build ga \
   --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:<digest>
@@ -116,14 +137,15 @@ Key settings already pre-filled in the template:
 | `setup_bastion_registry` | `true` | Required for disconnected mirroring |
 | `use_bastion_registry` | `true` | Routes cluster image pulls through bastion |
 | `setup_bastion_rhoai_services` | `true` | Enables Minio, PyPI cache, Git cache |
+| `setup_bastion_nfs` | `true` | NFS server on bastion for RHOAI PersistentVolumes (80 × 100 GB exports under `/var/nfs/`); enabled by default since no ODF or local-storage backend is assumed in the disconnected flow |
 
 ### `ansible/vars/sync-ocp-release.yml` (gitignored — create manually)
 
-Specifies the OCP release images to mirror to the bastion registry. See [tips-and-vars.md](tips-and-vars.md) for version string formats. The `--ocp-version` and `--ocp-build` flags in `deploy.sh` patch this file at runtime.
+Specifies the OCP release images to mirror to the bastion registry. See [tips-and-vars.md](tips-and-vars.md) for version string formats. The `--ocp-version` and `--ocp-build` flags in `deploy_rhoai_bm.sh` patch this file at runtime.
 
 ### `ansible/vars/sync-operator-index.yml` (gitignored — generated at deploy time)
 
-Specifies RHOAI operator and dependency images to mirror. This file is **generated and patched at deploy time** by `deploy.sh` when `--rhoai-fbc-image` is provided — do not edit it manually between runs.
+Specifies RHOAI operator and dependency images to mirror. This file is **generated and patched at deploy time** by `deploy_rhoai_bm.sh` when `--rhoai-fbc-image` is provided — do not edit it manually between runs.
 
 The starting template is `ansible/vars/sync-operator-index.sample.yml`, which ships pre-configured with three catalog sources:
 
@@ -141,7 +163,7 @@ The starting template is `ansible/vars/sync-operator-index.sample.yml`, which sh
 
 ## RHOAI Image Automation
 
-Passing `--rhoai-fbc-image` to `deploy.sh` triggers the full disconnected-imageset automation pipeline:
+Passing `--rhoai-fbc-image` to `deploy_rhoai_bm.sh` triggers the full disconnected-imageset automation pipeline:
 
 1. **Clone `disconnected-imageset`** — authenticated via `GITLAB_TOKEN` env var. Use `--imageset-repo <url>` to override the default internal GitLab URL.
 2. **Pin catalog digests** — `catalogs_to_sync[].catalog` fields in `sync-operator-index.yml` are updated with `@sha256:` digests from `disconnected-imageset/resources/ocp-digests.yaml`, ensuring exact reproducibility.
@@ -196,67 +218,90 @@ Reads `hw-config.yml`, queries QUADS for the current allocation, then queries ea
 python3 scripts/generate-nodes-override.py --init --cloud <cloud-id>
 ```
 
-Queries QUADS and Redfish to auto-populate `hw-config.yml`. Review before running `deploy.sh`.
+Queries QUADS and Redfish to auto-populate `hw-config.yml`. Review before running `deploy_rhoai_bm.sh`.
 
 ### Deployment after hardware changes
 
 ```bash
-./deploy.sh <cloud-id> --refresh-nodes
+./deploy_rhoai_bm.sh <cloud-id> --refresh-nodes
 ```
 
 Re-queries Redfish for current MACs and rewrites `nodes-override.json` before the inventory step.
 
 ---
 
-## `deploy.sh` — End-to-End Entrypoint
+## `deploy_rhoai_bm.sh` — End-to-End Entrypoint
 
-`deploy.sh` is the single entrypoint for Jenkins/CI automation. It runs all six deployment steps in sequence and patches vars files at runtime based on CLI arguments.
+`deploy_rhoai_bm.sh` is the single entrypoint for Jenkins/CI automation. It runs all deployment steps in sequence and patches vars files at runtime based on CLI arguments. Helper functions are in `deploy_rhoai_bm_utils.sh` (sourced automatically — do not execute it directly).
 
 ### Usage
 
 ```bash
-./deploy.sh <cloud-id> [OPTIONS]
+./deploy_rhoai_bm.sh <cloud-id> [OPTIONS]
 
 # Minimal (vars already configured):
-./deploy.sh cloud02
+./deploy_rhoai_bm.sh cloud02
 
-# Full RHOAI disconnected deployment:
-export GITLAB_TOKEN=<token>
-./deploy.sh cloud02 \
+# Full RHOAI disconnected deployment (credentials read from credentials.env):
+./deploy_rhoai_bm.sh cloud02 \
   --ocp-version latest-4.19 \
   --ocp-build ga \
-  --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:<digest>
+  --rhoai-fbc-image quay.io/rhoai/rhoai-fbc-fragment@sha256:<digest> \
+  --rhoai-channel beta \
+  --rhoai-update-channel beta \
+  --gpu-operator nvidia \
+  --add-custom-ca-bundles
 
 # Resume after interruption:
-./deploy.sh cloud02 --resume
+./deploy_rhoai_bm.sh cloud02 --resume
 ```
 
 ### CLI Arguments
+
+**Core deployment flags**
 
 | Argument | Description |
 |----------|-------------|
 | `<cloud-id>` | *(required)* Performance Lab cloud allocation ID, e.g. `cloud02` |
 | `--ocp-version VERSION` | OCP version string (e.g. `latest-4.19`, `4.19.1`). Patches `all.yml` and `sync-ocp-release.yml`. Also derives `operator_index_tag` for CatalogSource tag filtering. |
 | `--ocp-build BUILD` | OCP build type: `ga`, `dev`, or `ci`. Patches `all.yml`. |
-| `--rhoai-fbc-image URL` | RHOAI FBC image digest (e.g. `quay.io/rhoai/rhoai-fbc-fragment@sha256:…`). Triggers the full disconnected-imageset automation: catalog digest pinning, `additional_images` merge, `operator_index_tag` derivation, and `sync_rhoai_registries_conf`. Requires `GITLAB_TOKEN` env var. |
-| `--rhoai-channel CHANNEL` | RHOAI operator channel (e.g. `beta`). Use alongside `--rhoai-fbc-image` for EA/pre-GA releases where the channel cannot be auto-derived. |
+| `--rhoai-fbc-image URL` | RHOAI FBC image digest (e.g. `quay.io/rhoai/rhoai-fbc-fragment@sha256:…`). Triggers the full disconnected-imageset automation: catalog digest pinning, `additional_images` merge, `operator_index_tag` derivation, and `sync_rhoai_registries_conf`. Requires `GITLAB_TOKEN` in `credentials.env`. |
+| `--rhoai-channel CHANNEL` | Mirror-side channel (e.g. `stable-3.4`, `beta`). Patches `sync-operator-index.yml` so oc-mirror pulls the correct channel's operator bundles from the FBC catalog into the bastion registry (step 5). **Not** the install-time subscription channel — see `--rhoai-update-channel`. |
 | `--rhoai-version VERSION` | RHOAI operator version (e.g. `3.4.0-ea.2`). |
 | `--imageset-repo URL` | Override the disconnected-imageset Git URL (default: internal GitLab). |
+| `--cluster-name NAME` | OCP cluster name (default: `llmd`). Sets the DNS subdomain and `CLUSTER_APPS_DOMAIN`. Override when multiple clusters share a lab domain. |
 | `--nodes-override FILE` | Use a specific `ocpinventory.json`; skips Redfish node refresh. |
 | `--refresh-nodes` | Refresh `nodes-override.json` from QUADS + Redfish before deployment. |
 | `--resume` | Auto-detect completed steps and skip them. |
+
+**Post-install flags (steps 7a-7d — run after cluster is up)**
+
+| Argument | Description |
+|----------|-------------|
+| `--gpu-operator nvidia` | *(step 7b)* Install NFD + NVIDIA GPU operator via `ods-ci/gpu_deploy.sh`. Requires the `nvidia-operator` imageset to be mirrored (pass alongside `--rhoai-fbc-image`). |
+| `--s3-mirror-config CONFIG[,CONFIG…]` | *(step 7a)* Mirror one or more AWS S3 bucket configs into bastion Minio. CONFIG is the basename of a file under `disconnected-s3/configs/`. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `credentials.env`. |
+| `--s3-repo URL` | Override the `disconnected-s3` Git URL (required when `--s3-mirror-config` is set; default repo is internal GitLab). |
+| `--rhoai-update-channel CHANNEL` | *(step 7c)* Install-side OLM subscription channel (e.g. `stable-3.4`, `beta`). Passed to `./install-operator.sh rhods-operator <channel>` inside olminstall. Also **triggers** step 7c — omitting this flag skips RHOAI installation entirely even if the mirror is complete. Typically matches `--rhoai-channel`. Use alone with `--resume` to install RHOAI on a cluster whose mirror is already done: `./deploy_rhoai_bm.sh <cloud> --resume --rhoai-update-channel stable-3.4`. |
+| `--rhoai-catalog-source NAME` | CatalogSource name for RHOAI subscription (default: `rhoai-catalog-dev`). |
+| `--olminstall-repo URL` | Override the `olminstall` Git URL (default: internal GitLab; the repo is public and cloned with `http.sslVerify=false`). |
+| `--add-custom-ca-bundles` | *(step 7d)* Append bastion service CA certs (registry, Minio, PyPI cache, Git cache) to `default-dsci` `spec.trustedCABundle.customCABundle`. Requires RHOAI to be installed (step 7c). |
 
 ### Steps
 
 | Step | Description |
 |------|-------------|
 | 1 | Bootstrap Ansible virtual environment |
+| 1b | *(opt)* Refresh `nodes-override.json` from QUADS + Redfish (`--refresh-nodes`) |
 | 2 | Patch vars files (`all.yml`, `sync-operator-index.yml`), generate Ansible inventory |
-| 3 | Setup bastion (registry, DNS, Assisted Installer, Minio/PyPI/Git cache if enabled) |
+| 3 | Setup bastion (registry, DNS, Assisted Installer, Minio/PyPI/Git cache, NFS) |
 | 4 | Sync OCP release images to bastion registry |
 | 5 | Sync operator index + additional images to bastion registry via `oc-mirror` |
 | 6 | Deploy MNO cluster via Assisted Installer |
-| post | Apply IDMS/ITMS/CatalogSource manifests from `oc-mirror` working-dir; wait for MachineConfigPool rollout; write registry CA manifests to `/root/mno/` |
+| post | Apply IDMS/ITMS/CatalogSource manifests from `oc-mirror` working-dir; create `rhoai-catalog-dev` CatalogSource alias; wait for MachineConfigPool rollout; write registry CA manifests and `cluster-info.env` to `/root/mno/` |
+| 7a | *(opt)* Mirror AWS S3 buckets → bastion Minio (`--s3-mirror-config`) |
+| 7b | *(opt)* Install NFD + NVIDIA GPU operator (`--gpu-operator nvidia`) |
+| 7c | *(opt)* Install full RHOAI 3.x stack via olminstall (`--rhoai-update-channel`) |
+| 7d | *(opt)* Append bastion CA certs to DSCI `spec.trustedCABundle` (`--add-custom-ca-bundles`) |
 
 ### Resume Logic
 
@@ -270,10 +315,14 @@ With `--resume`, each step is skipped if its completion condition is already met
 | 4 — Sync OCP release | `.sync-ocp-done` marker present |
 | 5 — Sync operator index | `.sync-operators-done` marker present |
 | 6 — Deploy cluster | `/root/mno/kubeconfig` exists |
+| 7a — S3 mirror | Always re-runs when flag is set (S3 sync is idempotent) |
+| 7b — GPU operator | `oc get csv -A` shows a `gpu-operator.*Succeeded` CSV |
+| 7c — RHOAI install | `oc get csv -n redhat-ods-operator` shows `rhods-operator.*Succeeded` |
+| 7d — CA bundles | `default-dsci` `spec.trustedCABundle.customCABundle` is non-empty |
 
 ### Image Sync Tracking
 
-After each sync step, `deploy.sh` prints a grouped error summary parsed from the Ansible log:
+After each sync step, `deploy_rhoai_bm.sh` prints a grouped error summary parsed from the Ansible log:
 
 ```
   --- Operator index image sync summary ---
@@ -285,6 +334,35 @@ After each sync step, `deploy.sh` prints a grouped error summary parsed from the
 ```
 
 Full logs are written to `./deploy-logs/` with a timestamped filename.
+
+---
+
+### Deployment Outputs
+
+After a successful run the following artifacts are written to `/root/mno/` on the bastion:
+
+| Artifact | Path | Description |
+|----------|------|-------------|
+| Kubeconfig | `/root/mno/kubeconfig` | Cluster admin kubeconfig. `server:` is patched to `https://<bastion-fqdn>:6443` with `insecure-skip-tls-verify: true` so Jenkins can use it directly without SSH access to the bastion. |
+| kubeadmin password | `/root/mno/kubeadmin-password` | Plaintext cluster admin password. |
+| Cluster info | `/root/mno/cluster-info.env` | Machine-readable env file — stable interface for Jenkins and other consumers. |
+| Registry CA ConfigMap | `/root/mno/registry-ca-configmap.yaml` | OCP manifest to trust the bastion self-signed registry CA. Apply with `oc apply -f`. |
+| Image config patch | `/root/mno/image-config-patch.yaml` | Patch for `image.config.openshift.io/cluster` that references the CA ConfigMap. Apply with `oc patch --patch-file`. |
+
+**`cluster-info.env` schema:**
+
+```bash
+CLUSTER_API_URL=https://<bastion-fqdn>:6443         # externally reachable API endpoint (via HAProxy)
+CLUSTER_APPS_DOMAIN=apps.<cluster>.<base_dns>        # wildcard app route domain
+BASTION_FQDN=<bastion-fqdn>                         # bastion hostname (publicly resolvable)
+KUBECONFIG_PATH=/root/mno/kubeconfig                 # path to cluster admin kubeconfig (server: patched to bastion FQDN)
+KUBEADMIN_PASSWORD_PATH=/root/mno/kubeadmin-password
+SQUID_HTTP_PROXY=http://<bastion-fqdn>:3128          # Squid forward proxy for app-route resolution
+SQUID_HTTPS_PROXY=http://<bastion-fqdn>:3128         # same proxy for HTTPS CONNECT tunneling
+RHOAI_FBC_IMAGE=<image@digest>                       # FBC image used at deploy time (empty if not provided)
+```
+
+External consumers read `CLUSTER_APPS_DOMAIN` to construct app route URLs. `CLUSTER_API_URL` is the externally reachable API endpoint via HAProxy — no direct cluster network access is required. Jenkins sets `HTTPS_PROXY=${SQUID_HTTPS_PROXY}` so pod agents can resolve `*.apps.*` routes through the bastion's local dnsmasq.
 
 ---
 
