@@ -27,3 +27,4 @@ scripts/self-sched-deploy/repos/
 deploy-logs/
 nodes-override.json
 ansible/vars/hw-config.yml
+credentials.env
