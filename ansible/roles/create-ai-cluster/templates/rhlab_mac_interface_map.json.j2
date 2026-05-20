@@ -1,11 +1,11 @@
 [
     {
-        "mac_address": "{{ hostvars[item]['mac_address'] }}",
+        "mac_address": "{{ hostvars[item]['mac_address'] | lower }}",
         "logical_nic_name": "{{ hostvars[item]['network_interface'] }}"
     {% if 'lab_mac' in hostvars[item] %}
     },
     {
-        "mac_address": "{{ hostvars[item]['lab_mac'] }}",
+        "mac_address": "{{ hostvars[item]['lab_mac'] | lower }}",
         "logical_nic_name": "{{ hostvars[item]['lab_interface'] }}"
     {% endif %}
     }

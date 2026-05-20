@@ -26,7 +26,6 @@
 - name: "Dell - Check for Virtual Media for {{ item }}"
   ansible.builtin.uri:
     url: "https://{{ hostvars[item]['bmc_address'] }}/redfish/v1/Managers/iDRAC.Embedded.1/VirtualMedia/CD"
-    force_basic_auth: yes
     user: "{{ hostvars[item]['bmc_user'] }}"
     password: "{{ hostvars[item]['bmc_password'] }}"
     force_basic_auth: true
@@ -50,7 +49,6 @@
   - name: "Dell - Eject any CD Virtual Media for {{ item }}"
     ansible.builtin.uri:
       url: "https://{{ hostvars[item]['bmc_address'] }}/redfish/v1/Managers/iDRAC.Embedded.1/VirtualMedia/CD/Actions/VirtualMedia.EjectMedia"
-      force_basic_auth: yes
       user: "{{ hostvars[item]['bmc_user'] }}"
       password: "{{ hostvars[item]['bmc_password'] }}"
       force_basic_auth: true
@@ -125,7 +123,18 @@
     status_code: 200
     return_content: yes
 
-- name: "DELL - Power ON for {{ item }}"
+- name: "DELL - Power cycle for {{ item }} (force restart if already on)"
+  community.general.redfish_command:
+    category: Systems
+    command: PowerForceRestart
+    baseuri: "{{ hostvars[item]['bmc_address'] }}"
+    username: "{{ hostvars[item]['bmc_user'] }}"
+    password: "{{ hostvars[item]['bmc_password'] }}"
+    timeout: 60
+  register: power_restart_result
+  ignore_errors: true
+
+- name: "DELL - Power on for {{ item }} (node was already off)"
   community.general.redfish_command:
     category: Systems
     command: PowerOn
@@ -137,3 +146,4 @@
   until: not result.failed
   retries: 10
   delay: 30
+  when: power_restart_result is failed

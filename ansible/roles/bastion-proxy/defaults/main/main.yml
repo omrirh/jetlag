@@ -12,8 +12,9 @@ proxy_conf_dir: /opt/squid/conf
 proxy_cache_size_mb: 10000
 proxy_max_object_size_mb: 4096
 
-# IPv6 settings
-proxy_listen_ipv6: true
+# IPv6 settings — disabled by default; Performance Lab hosts have IPv6 disabled
+# at the kernel level and Squid will fail to start if this is true on such hosts.
+proxy_listen_ipv6: false
 
 # ACL - which hosts can use the proxy (auto-populated from controlplane_network)
 proxy_allowed_networks: "{{ controlplane_network }}"

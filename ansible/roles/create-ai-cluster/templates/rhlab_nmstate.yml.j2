@@ -1,6 +1,8 @@
 interfaces:
 - name: {{ hostvars[item]['network_interface'] }}
   type: ethernet
+  identifier: mac-address
+  mac-address: "{{ hostvars[item]['mac_address'] | lower }}"
   state: up
 {% if 'ip' in hostvars[item] and hostvars[item]['ip'] | ansible.utils.ipv4 %}
   ipv4:
@@ -34,6 +36,8 @@ interfaces:
 {% if 'lab_mac' in hostvars[item] %}
 - name: {{ hostvars[item]['lab_interface']}}
   type: ethernet
+  identifier: mac-address
+  mac-address: "{{ hostvars[item]['lab_mac'] | lower }}"
   state: up
   ipv4:
     auto-dns: false
