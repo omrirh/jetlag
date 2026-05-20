@@ -20,3 +20,13 @@ git_cache_image: quay.io/modh/ods-ci-git-cache:latest
 git_cache_dir: /opt/git-cache
 git_cache_port_http: 9080
 git_cache_port_https: 9081
+
+# NFS server (for RHOAI PersistentVolumes)
+setup_bastion_nfs: true
+nfs_export_base: /var/nfs
+nfs_pv_count: 80
+nfs_pv_size_label: 100gb
+nfs_export_network: >-
+  {{ controlplane_network[0]
+     if (controlplane_network is iterable and controlplane_network is not string)
+     else controlplane_network | default('0.0.0.0/0') }}

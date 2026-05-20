@@ -120,3 +120,43 @@
   register: git_crt_result
   until: git_crt_result.rc == 0
 
+#################################
+############ NFS ################
+#################################
+- name: NFS - Install nfs-utils
+  yum:
+    name: nfs-utils
+    state: present
+    disable_gpg_check: true
+  when: setup_bastion_nfs | bool
+
+- name: NFS - Create export directories
+  file:
+    path: "{{ nfs_export_base }}/pv-{{ nfs_pv_size_label }}-{{ item }}"
+    state: directory
+    owner: nobody
+    group: nobody
+    mode: "0777"
+  loop: "{{ range(1, nfs_pv_count | int + 1) | list }}"
+  when: setup_bastion_nfs | bool
+
+- name: NFS - Write /etc/exports
+  copy:
+    dest: /etc/exports
+    content: |
+      {% for i in range(1, nfs_pv_count | int + 1) %}
+      {{ nfs_export_base }}/pv-{{ nfs_pv_size_label }}-{{ i }} {{ nfs_export_network }}(rw,sync,no_subtree_check,no_root_squash)
+      {% endfor %}
+  when: setup_bastion_nfs | bool
+
+- name: NFS - Enable and start nfs-server
+  systemd:
+    name: nfs-server
+    enabled: true
+    state: started
+  when: setup_bastion_nfs | bool
+
+- name: NFS - Export filesystems
+  command: exportfs -arv
+  when: setup_bastion_nfs | bool
+
