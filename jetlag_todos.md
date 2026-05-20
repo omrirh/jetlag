@@ -292,6 +292,22 @@ Squid must be running and reachable on port 3128.
 
 ---
 
+### J-19 — Mirror openldap image for RHOAI test identity provider
+
+RHOAI test setup (via olminstall/ods-ci) deploys an OpenLDAP pod used as an identity provider. The image is pulled from a personal quay.io namespace:
+
+```
+quay.io/rh-ee-jstetina/openldap-ocp@sha256:10233fef19f10b1b7d48f85e71faa064b98f422a984c522a86607ab35e56d21c
+```
+
+In a disconnected environment this pull fails with `ImagePullBackOff` since quay.io is unreachable.
+
+**Next step:** talk to Jakub (jstetina) about image access and whether there is a plan to promote this to an official registry location.
+
+**Fix:** once access/location is confirmed, add to `additional_images` in the imageset config so the image lands in the bastion registry before olminstall runs.
+
+---
+
 ### J-18 — Add `registry.stage.redhat.io` credentials and `rhaii` imageset coverage
 
 All `LLMInferenceServiceConfig` objects installed by RHOAI 3.4 reference images from `registry.redhat.io/rhaii/` (`vllm-cuda-rhel9`, `vllm-rocm-rhel9`, `vllm-gaudi-rhel9`, `vllm-spyre-rhel9`, `vllm-cpu-rhel9`). These images are **not yet promoted to production** — they exist only on `registry.stage.redhat.io/rhaii/`. The production registry returns "manifest unknown" for their digests; the stage registry returns "unauthorized" because the bastion pull-secret does not include stage registry credentials.
