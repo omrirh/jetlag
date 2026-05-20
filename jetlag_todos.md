@@ -9,7 +9,7 @@
 | `credentials.env.example` | Added `MINIO_USERNAME`/`MINIO_PASSWORD` with defaults matching `bastion-rhoai-services` role (`minioadmin`/`minioadmin`). Documents override path when `minio_username`/`minio_password` are changed in `ansible/vars/all.yml`. |
 | S3 mirror (M-4) | `all-smoke` config fully mirrored to bastion MinIO: `ods-ci-s3` (3.6 GiB), `ods-ci-wisdom` (8.6 GiB), `rhoai-dw` (11 MiB), 3× empty buckets. AWS credentials sourced from Vault `apps/rhods-ci/aws/rhods-jenkins`. |
 | `bastion-rhoai-services` role | Containerized Minio (9000/9001), PyPI cache (9443), Git cache (9080/9081) via `setup_bastion_rhoai_services: true` in `setup-bastion.yml` |
-| `populate_rhoai_images()` in `deploy.sh` | Clones `disconnected-imageset` at runtime, merges `additional_images` from rhoai-ci + rhoai-{version} + dependent-operators + custom-images into `sync-operator-index.yml`; pins catalog digests |
+| `populate_rhoai_images()` in `deploy_rhoai_bm.sh` | Clones `disconnected-imageset` at runtime, merges `additional_images` from rhoai-ci + rhoai-{version} + dependent-operators + custom-images into `sync-operator-index.yml`; pins catalog digests |
 | `clone_disconnected_imageset()` | Authenticated clone/pull of disconnected-imageset via `GITLAB_TOKEN` env var |
 | `sync_rhoai_registries_conf` | Writes `registries.conf.d/rhoai.conf` mirror entry so `oc-mirror` resolves `registry.redhat.io/rhoai → quay.io/rhoai` |
 | `image_tag_mirrors` / `image_digest_mirrors` | Vars added to `sync-operator-index` role and documented in sample vars |
@@ -19,7 +19,7 @@
 
 ## Motivation
 
-After `deploy.sh` finishes, the cluster is fully operational but reachable only
+After `deploy_rhoai_bm.sh` finishes, the cluster is fully operational but reachable only
 from within the bastion host. The bastion's HAProxy already forwards `:6443`,
 `:443`, and `:80` from its public IP to the cluster — no HAProxy changes are needed.
 
@@ -41,9 +41,9 @@ without any human-in-the-loop hand-off or SSH access to the bastion.
 
 ## Action Items
 
-### J-1 — ✅ DONE — Emit `cluster-info.env` at the end of `deploy.sh` step 6
+### J-1 — ✅ DONE — Emit `cluster-info.env` at the end of `deploy_rhoai_bm.sh` step 6
 
-**Implemented** in `deploy.sh` post-deploy section. Reads `cluster_name` and `base_dns_name` from the inventory file, writes `/root/mno/cluster-info.env` with:
+**Implemented** in `deploy_rhoai_bm.sh` post-deploy section. Reads `cluster_name` and `base_dns_name` from the inventory file, writes `/root/mno/cluster-info.env` with:
 
 Write a file at `/root/mno/cluster-info.env` after the cluster is up, containing:
 
@@ -99,31 +99,9 @@ auth artifact Jenkins needs; no pipeline-side server-URL rewrite required.
 
 ---
 
-### J-3 — Document deployment outputs in `docs/deploy-mno-rhoai-disconnected.md`
+### J-3 — ✅ DONE — Document deployment outputs in `docs/deploy-mno-rhoai-disconnected.md`
 
-Add a section titled **"Deployment Outputs"** to
-`docs/deploy-mno-rhoai-disconnected.md` that describes every artifact `deploy.sh`
-writes after a successful run, so Jenkins admins and operators have a stable
-reference without reading the script.
-
-Minimum content:
-
-| Artifact | Path on bastion | Description |
-|----------|----------------|-------------|
-| Kubeconfig | `/root/mno/kubeconfig` | Cluster admin kubeconfig; `server:` patched to bastion FQDN (after J-2) |
-| kubeadmin password | `/root/mno/kubeadmin-password` | Plaintext cluster admin password |
-| Cluster info | `/root/mno/cluster-info.env` | Machine-readable env file with API URL, apps domain, and artifact paths (after J-1) |
-
-Include the full schema of `cluster-info.env` (all keys and their meaning) and
-note which fields Jenkins consumes and how.
-
-**Depends on:** J-1 and J-2 implemented so the documented behaviour matches the
-actual output.
-
-**Unblocks (Jenkins):**
-[JS-5](jenkins_todos.md#js-5--document-the-jenkins-paramspreamble-contract) — the
-Jenkins contract doc can cross-reference this section rather than duplicating the
-output schema.
+**Implemented** in the "Deployment Outputs" section of `docs/deploy-mno-rhoai-disconnected.md`. Documents all artifacts written to `/root/mno/` including kubeconfig, kubeadmin password, `cluster-info.env` (full schema with all keys), registry CA manifests, and image config patch.
 
 ---
 
@@ -143,7 +121,7 @@ output schema.
 
 ### J-6 — Investigate `Error: bad expression` in `dependent-operators/generate.sh`
 
-During `populate_rhoai_images()` in `deploy.sh`, the `dependent-operators/generate.sh`
+During `populate_rhoai_images()` in `deploy_rhoai_bm.sh`, the `dependent-operators/generate.sh`
 emits 3 `Error: bad expression, please check expression syntax` messages. The `isc.yaml`
 output is still correct (digests are properly substituted), so this has not blocked any
 test runs so far. However the root cause is unconfirmed and may silently affect other
@@ -172,7 +150,7 @@ uses the unversioned form).
 
 ### J-7 — Handle missing `rhoai-{version}` directory in disconnected-imageset
 
-`find_rhoai_version_dir()` in `deploy.sh` maps the RHOAI version derived from the FBC
+`find_rhoai_version_dir()` in `deploy_rhoai_bm.sh` maps the RHOAI version derived from the FBC
 image (e.g. `3.4.0-ea.2`) to the corresponding `imagesets/v2/rhoai-3.4.EA2` directory in
 the cloned `disconnected-imageset` repo. When the directory doesn't exist (e.g. only
 `rhoai-3.4.EA1` is present), the function logs a warning and skips version-specific images.
@@ -191,7 +169,7 @@ will not mirror workbench notebook images for that RHOAI release.
 
 ### J-15 — Add NFS StorageClass + PersistentVolumes to post-deploy step
 
-The `bastion-rhoai-services` Ansible role creates 80 NFS export directories on the bastion and starts `nfs-server`, but never creates the corresponding OpenShift `StorageClass` or `PersistentVolume` objects. As a result, any PVC that requests dynamic or static NFS storage (e.g. `model-catalog-postgres`) stays Pending indefinitely.
+The `bastion-rhoai-services` role creates 80 NFS export dirs and starts `nfs-server`, but never creates the corresponding OpenShift `StorageClass` or `PersistentVolume` objects. Any PVC requesting NFS storage (e.g. `model-catalog-postgres`) stays Pending indefinitely.
 
 **Steps to implement in `deploy_rhoai_bm.sh` post-deploy section:**
 1. Create a `StorageClass` named `nfs-bastion` (no provisioner — static binding):
@@ -239,50 +217,9 @@ Bucket name should be derived from the `--s3-mirror-config` value or made config
 
 ---
 
-### J-17 — Fix malformed NFS `/etc/exports` network (Jinja2 list rendering bug)
+### J-17 — ✅ DONE — Fix malformed NFS `/etc/exports` network (Jinja2 list rendering bug)
 
-`controlplane_network` is stored as a single-element Python list `['198.18.0.0/16']` in
-Jetlag's generated inventory files. The `bastion-rhoai-services` role default passes it
-directly into the template:
-
-```yaml
-# ansible/roles/bastion-rhoai-services/defaults/main/main.yml
-nfs_export_network: "{{ controlplane_network | default('0.0.0.0/0') }}"
-```
-
-Jinja2 renders the list repr literally, producing:
-```
-/var/nfs/pv-100gb-1 ['198.18.0.0/16'](rw,sync,no_subtree_check,no_root_squash)
-```
-
-The NFS server treats `['198.18.0.0/16']` as a hostname — no client matches it and all
-NFS mounts return `access denied`.
-
-**Observed on cloud54:** discovered when `model-catalog-postgres` pod reached
-`MountVolume.SetUp failed: exit status 32` after the StorageClass/PV issue (J-15) was
-resolved. Fixed manually with `sed -i "s/\['\(.*\)'\]/\1/g" /etc/exports && exportfs -ra`.
-
-**Fix:** normalize `controlplane_network` to a plain CIDR string in the defaults:
-
-```yaml
-# ansible/roles/bastion-rhoai-services/defaults/main/main.yml
-nfs_export_network: >-
-  {{ controlplane_network[0]
-     if (controlplane_network is iterable and controlplane_network is not string)
-     else controlplane_network | default('0.0.0.0/0') }}
-```
-
-This handles both the list form (`['198.18.0.0/16']`) and any future inventory that
-defines `controlplane_network` as a plain string.
-
-**Files to change:**
-- `ansible/roles/bastion-rhoai-services/defaults/main/main.yml` — `nfs_export_network` default (1 line)
-
-**Test:** after the fix, `/etc/exports` on a fresh bastion should contain bare CIDRs:
-```
-/var/nfs/pv-100gb-1 198.18.0.0/16(rw,sync,no_subtree_check,no_root_squash)
-```
-and worker nodes in that subnet must be able to mount without `access denied`.
+**Implemented** in `ansible/roles/bastion-rhoai-services/defaults/main/main.yml`. `nfs_export_network` now normalises `controlplane_network` from its list form `['198.18.0.0/16']` to a bare CIDR string, preventing NFS `access denied` on all worker nodes.
 
 ---
 
@@ -305,7 +242,7 @@ self-signed registry CA so that RHOAI components can pull images from
 - Does setting `additionalTrustedCA` on the cluster image config suffice for RHOAI, or
   does DSCI require an explicit `spec.trustedCABundle`?
 - Should this be added to `bastion-rhoai-services`, a new role, or handled inline in
-  `deploy.sh` step 7 (post-install)?
+  `deploy_rhoai_bm.sh` step 7 (post-install)?
 
 ### J-9 — ✅ Resolved: DNS strategy for external consumers
 
@@ -381,15 +318,11 @@ Then add `rhaii/vllm-cuda-rhel9` (and CPU/ROCm/Gaudi/Spyre variants as needed) t
 
 ## Cross-Reference Summary
 
-| This task | Relationship | Jenkins task |
-|-----------|-------------|--------------|
-| J-1 (emit `cluster-info.env`) | unblocks | JS-2 (`CLUSTER_APPS_DOMAIN` auto-sourced) |
-| J-2 (patch kubeconfig `server:`) | blocked by | JS-4 (TLS strategy decision) |
-| J-2 (patch kubeconfig `server:`) | unblocks | JS-2 (kubeconfig usable directly) |
-| J-3 (document deployment outputs) | unblocks | JS-5 (Jenkins contract doc can cross-reference) |
-| J-6 (`bad expression` in generate.sh) | upstream issue | disconnected-imageset repo |
-| J-7 (missing rhoai version dir) | upstream issue | disconnected-imageset repo |
-| J-8 (registry CA for DSCI) | unblocks | RHOAI disconnected install |
-| J-9 (DNS strategy) | ✅ resolved by | J-X (Squid proxy on bastion) |
-| J-X (deploy `bastion-proxy`, open port 3128) | unblocks | JS-3 (Jenkins proxy config) |
-| J-17 (NFS exports malformed CIDR) | blocks | NFS mounts from all worker nodes on fresh deployments |
+| This task | Status | Notes |
+|-----------|--------|-------|
+| J-6 (`bad expression` in generate.sh) | ⏳ upstream | Cosmetic; fix in `disconnected-imageset` repo |
+| J-7 (missing rhoai version dir) | ⏳ upstream | Resolves automatically once upstream adds the GA directory |
+| J-8 (registry CA for DSCI) | ⏳ open | Manifests generated and applied to cluster; DSCI `spec.trustedCABundle` wiring unconfirmed |
+| J-15 (NFS StorageClass + PVs) | ⏳ open | Bastion NFS exports ready; OCP objects not yet created by automation |
+| J-16 (DataConnection for MinIO) | ⏳ open | Not created after S3 mirror step |
+| J-18 (rhaii imageset + stage credentials) | ⏳ open | GPU serving images missing from disconnected imageset |
