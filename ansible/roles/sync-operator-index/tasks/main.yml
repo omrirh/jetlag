@@ -25,21 +25,6 @@
     src: imagesetconf.yml.j2
     dest: "{{ sync_path }}/operators/{{ operator_index_name }}/imagesetconf.yml"
 
-- name: Pre-flight registry cleanup - remove incomplete uploads
-  # _uploads dirs are blob staging areas left by interrupted pushes. They are never
-  # referenced by any manifest and can grow to tens of GB across failed runs.
-  shell: |
-    find {{ registry_path }}/data/docker/registry/v2/repositories \
-      -type d -name '_uploads' -exec rm -rf {} + 2>/dev/null; true
-
-- name: Pre-flight registry cleanup - garbage collect orphaned blobs
-  # Removes blobs pushed without a committed manifest (e.g. killed mid-transfer).
-  # Runs read-only first as a no-op to validate, then deletes.
-  shell: |
-    podman exec bastion-registry /bin/registry garbage-collect \
-      /etc/docker/registry/config.yml --delete-untagged 2>&1 | tail -3
-  ignore_errors: true
-
 - name: Mirror operator index images
   shell: |
     oc mirror --authfile {{ registry_path }}/pull-secret-bastion.txt -c {{ sync_path }}/operators/{{ operator_index_name }}/imagesetconf.yml --workspace file://{{ sync_path }}/operators/{{ operator_index_name }} docker://{{ registry_host }}:{{ registry_port }} --v2
