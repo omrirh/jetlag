@@ -15,6 +15,8 @@
   - validate-vars
   - ocp-release
   - bastion-install
+  - role: bastion-storage
+    when: (bastion_registry_disk | default("") | length > 0) or (bastion_nfs_disk | default("") | length > 0)
   - bastion-network
   - role: bastion-dnsmasq
     when: not setup_coredns

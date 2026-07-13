@@ -1,0 +1,30 @@
+---
+# bastion-storage: provision dedicated disks for the bastion's large data
+# consumers (container image registry, NFS PV exports) so they never compete
+# with the root filesystem. A full disconnected RHOAI mirror needs ~500 GB in
+# the registry alone, which exceeds the root LV on most lab bastion models.
+#
+# Disk spec values:
+#   ""            - (default) skip provisioning for this volume
+#   auto          - pick the largest unused block device: a whole disk with no
+#                   partitions, no filesystem signature, and nothing mounted
+#   /dev/nvmeXnY  - use this exact device; it must be unused by the same
+#                   rules as auto (run wipefs -a manually to clear a stale
+#                   leftover filesystem first)
+#
+# A volume is skipped (no-op) when its mountpoint is already a mounted
+# filesystem, so re-running setup-bastion is always safe.
+bastion_registry_disk: ""
+bastion_nfs_disk: ""
+
+# Volume definitions consumed by tasks. Mountpoints reuse the existing path
+# vars so the rest of Jetlag is unaffected.
+bastion_storage_volumes:
+  - name: registry
+    disk: "{{ bastion_registry_disk | default('') }}"
+    mountpoint: "{{ registry_path | default('/opt/registry') }}"
+    label: registry           # xfs labels are limited to 12 characters
+  - name: nfs
+    disk: "{{ bastion_nfs_disk | default('') }}"
+    mountpoint: "{{ nfs_export_base | default('/var/nfs') }}"
+    label: nfs-data

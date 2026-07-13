@@ -52,6 +52,13 @@ setup_bastion_gogs: false
 setup_bastion_registry: true
 use_bastion_registry: true
 
+# Provision dedicated disks for the registry and NFS PV exports so they never
+# fill the root filesystem (a full RHOAI mirror needs ~500 GB). "auto" picks
+# the largest unused disk (no partitions, no filesystem, nothing mounted); an
+# explicit device (e.g. /dev/nvme0n1) may also be given; "" skips.
+bastion_registry_disk: auto
+bastion_nfs_disk: auto
+
 setup_bastion_proxy: false
 
 # Enable Minio (9000/9001), PyPI cache (9443), and Git cache (9080/9081) on the bastion

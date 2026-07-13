@@ -1,0 +1,12 @@
+---
+# Provision dedicated disks for large bastion data volumes (registry, NFS).
+# Each volume is handled independently and is a no-op when its mountpoint is
+# already a mounted filesystem, so this role is safe on every re-run.
+
+- name: Provision bastion storage volumes
+  include_tasks: volume.yml
+  loop: "{{ bastion_storage_volumes }}"
+  loop_control:
+    loop_var: volume
+    label: "{{ volume.name }}"
+  when: volume.disk | length > 0

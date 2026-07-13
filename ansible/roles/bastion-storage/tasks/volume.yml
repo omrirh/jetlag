@@ -1,0 +1,100 @@
+---
+# Provision a single storage volume (volume.name / volume.disk /
+# volume.mountpoint / volume.label). Safety rules:
+# - If the mountpoint is already a mounted filesystem, do nothing.
+# - If a filesystem labeled volume.label already exists, mount that (never
+#   reformat).
+# - "auto" only considers whole disks with no partitions, no filesystem
+#   signature, and nothing mounted; explicit devices are validated against
+#   the same rules before formatting.
+
+- name: "{{ volume.name }} - Check if mountpoint is already a mounted filesystem"
+  command: findmnt --noheadings --output SOURCE --mountpoint {{ volume.mountpoint }}
+  register: volume_mounted
+  failed_when: false
+  changed_when: false
+
+- name: "{{ volume.name }} - Provision disk and mount"
+  when: volume_mounted.rc != 0
+  block:
+  - name: "{{ volume.name }} - Check for existing filesystem with label {{ volume.label }}"
+    command: blkid --label {{ volume.label }}
+    register: volume_labeled_fs
+    failed_when: false
+    changed_when: false
+
+  - name: "{{ volume.name }} - Select and format disk"
+    when: volume_labeled_fs.rc != 0
+    block:
+    - name: "{{ volume.name }} - Find largest unused disk"
+      shell: |
+        set -e
+        claimed="{{ bastion_storage_claimed_disks | default([]) | join(' ') }}"
+        best=""
+        best_size=0
+        for d in $(lsblk --bytes --nodeps --noheadings --output NAME,TYPE | awk '$2=="disk"{print $1}'); do
+          dev="/dev/$d"
+          case " $claimed " in *" $dev "*) continue ;; esac
+          # skip disks with partitions/holders (children in lsblk output)
+          [ "$(lsblk --noheadings --output NAME $dev | wc -l)" -eq 1 ] || continue
+          # skip disks with any mounted filesystem in their subtree
+          [ -z "$(lsblk --noheadings --output MOUNTPOINT $dev | tr -d '[:space:]')" ] || continue
+          # skip disks carrying any filesystem/RAID/LVM signature
+          blkid $dev > /dev/null 2>&1 && continue
+          size=$(lsblk --bytes --nodeps --noheadings --output SIZE $dev)
+          if [ "$size" -gt "$best_size" ]; then
+            best="$dev"
+            best_size=$size
+          fi
+        done
+        echo "$best"
+      register: volume_auto_disk
+      changed_when: false
+      when: volume.disk == "auto"
+
+    - name: "{{ volume.name }} - Fail when no unused disk is available"
+      fail:
+        msg: >-
+          bastion-storage: no unused disk found for the {{ volume.name }}
+          volume. Set bastion_{{ volume.name }}_disk to an explicit device
+          or "" to skip provisioning.
+      when:
+      - volume.disk == "auto"
+      - volume_auto_disk.stdout | trim | length == 0
+
+    - name: "{{ volume.name }} - Set selected disk"
+      set_fact:
+        volume_disk: "{{ volume_auto_disk.stdout | trim if volume.disk == 'auto' else volume.disk }}"
+
+    # Explicit devices must pass the same safety rules as auto-selection:
+    # this role never writes to a disk that contains anything. A leftover
+    # filesystem from a previous tenant must be cleared manually first
+    # (wipefs -a <device>) after confirming its data is disposable.
+    - name: "{{ volume.name }} - Validate explicitly configured disk is unused"
+      shell: |
+        dev={{ volume_disk }}
+        [ -b "$dev" ] || { echo "$dev is not a block device"; exit 1; }
+        [ "$(lsblk --noheadings --output NAME $dev | wc -l)" -eq 1 ] || { echo "$dev has partitions"; exit 1; }
+        [ -z "$(lsblk --noheadings --output MOUNTPOINT $dev | tr -d '[:space:]')" ] || { echo "$dev is mounted"; exit 1; }
+        ! blkid $dev > /dev/null 2>&1 || { echo "$dev has an existing filesystem signature; run wipefs -a $dev first if its contents are disposable"; exit 1; }
+      changed_when: false
+      when: volume.disk != "auto"
+
+    - name: "{{ volume.name }} - Create xfs filesystem on {{ volume_disk }}"
+      command: mkfs.xfs -f -L {{ volume.label }} {{ volume_disk }}
+
+    - name: "{{ volume.name }} - Record claimed disk"
+      set_fact:
+        bastion_storage_claimed_disks: "{{ bastion_storage_claimed_disks | default([]) + [volume_disk] }}"
+
+  - name: "{{ volume.name }} - Create mountpoint directory"
+    file:
+      path: "{{ volume.mountpoint }}"
+      state: directory
+
+  - name: "{{ volume.name }} - Mount volume and persist in fstab"
+    mount:
+      path: "{{ volume.mountpoint }}"
+      src: "LABEL={{ volume.label }}"
+      fstype: xfs
+      state: mounted

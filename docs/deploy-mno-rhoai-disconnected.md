@@ -56,6 +56,10 @@ Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
 Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, obtain pull-secret).
 
+### Bastion storage
+
+A full disconnected RHOAI mirror needs **~500 GB** in the bastion registry (`/opt/registry`) — more than the root filesystem on most lab bastion models — and the NFS PV exports (`/var/nfs`) grow further once RHOAI workloads run. The sample vars set `bastion_registry_disk: auto` and `bastion_nfs_disk: auto`, which makes `setup-bastion.yml` provision each onto the largest unused disk on the bastion (formatted XFS, mounted, persisted in fstab). The provisioning never writes to a disk that contains anything: only disks with no partitions, no filesystem signature, and nothing mounted are eligible, whether auto-selected or named explicitly (e.g. `bastion_registry_disk: /dev/nvme0n1`). To reuse a disk holding a disposable leftover filesystem, clear it manually first with `wipefs -a <device>`. Set the vars to `""` to skip provisioning — only advisable if the root filesystem has ≥600 GB free.
+
 ### Required credentials
 
 | Credential | Used for | How to obtain |
