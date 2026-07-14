@@ -44,6 +44,13 @@ Read this before modifying anything; each group is a semantic unit with its own 
      pattern as r650/r760). `--init` guessed both wrong once; symptom is the discovery
      timeout described below.
 4. Storage sanity: `lsblk` on the bastion — expect ≥1 unused multi-TB disk for the registry.
+5. **RHOAI install-sequence drift check**: `install_rhoai()` in `deploy_rhoai_bm_utils.sh` is a
+   hand-copied translation of `installRHOAI()` (isRhoai3 branch) in the Jenkins repo
+   `gitlab.cee.redhat.com/ods/jenkins`, `vars/disconnectedCluster.groovy`. Script *content*
+   auto-propagates (olminstall is cloned fresh each run) but the *orchestration sequence*
+   does not. Before a new deployment campaign, diff our operator/configure call sequence
+   against the groovy's `sh "./..."` lines and port any added/removed/reordered steps
+   (last verified aligned: 2026-07-14, groovy last changed 2026-06-24).
 
 ## Canonical command
 
