@@ -21,10 +21,12 @@ cache_log /var/log/squid/cache.log
 acl localnet src {{ network }}
 {% endfor %}
 
-# Safe ports (standard HTTP/HTTPS)
+# Safe ports (standard HTTP/HTTPS + kubernetes API)
 acl SSL_ports port 443
+acl SSL_ports port 6443    # Allow CONNECT tunnel for kubernetes API
 acl Safe_ports port 80
 acl Safe_ports port 443
+acl Safe_ports port 6443
 acl CONNECT method CONNECT
 
 # Deny requests to unsafe ports
