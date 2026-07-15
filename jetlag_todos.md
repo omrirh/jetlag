@@ -69,29 +69,24 @@ sourced from this file instead of being entered manually per job run.
 
 ---
 
-### J-2 — ✅ DONE — Patch the kubeconfig `server:` field to the bastion FQDN
+### J-2 — ✅ DONE — Patch the kubeconfig for external (Jenkins) consumption
 
-After the cluster kubeconfig is written to `/root/mno/kubeconfig`, rewrite the
-`server:` line from the internal cluster API IP to `https://<bastion-fqdn>:6443`.
+**Implemented** as `patch_kubeconfig_server()` in `deploy_rhoai_bm_utils.sh`,
+called in the post-deploy phase of every run. For each cluster entry in
+`/root/mno/kubeconfig` it:
 
-```bash
-BASTION_FQDN=$(hostname -f)   # or read from inventory
-yq e ".clusters[].cluster.server = \"https://${BASTION_FQDN}:6443\"" \
-  -i /root/mno/kubeconfig
-```
+1. Rewrites `server:` to `https://<bastion-fqdn>:6443` (bastion HAProxy forwards
+   6443 to the cluster API; the FQDN is publicly resolvable).
+2. Sets `insecure-skip-tls-verify: true` and **removes**
+   `certificate-authority-data` — the API TLS cert is issued for
+   `api.<cluster>.*`, not the bastion FQDN, so verification would always fail
+   (this resolves the former JS-4 TLS-strategy question in favor of skip-verify).
+3. Idempotent: skips when `server:` already points at the bastion FQDN, so
+   `--resume` re-runs are safe.
 
-The kubeconfig is then usable by Jenkins as-is: the bastion FQDN is publicly
-resolvable, and Jenkins can derive `BASTION_IP` from it in the preamble without
-any explicit IP param.
-
-The TLS configuration embedded in the kubeconfig (CA bundle vs. skip-verify) is
-determined by the outcome of
-[JS-4](jenkins_todos.md#js-4--decide-on-tls-strategy); implement whichever option
-is chosen there.
-
-**Blocked by (Jenkins):**
-[JS-4](jenkins_todos.md#js-4--decide-on-tls-strategy) — TLS strategy must be
-decided before the kubeconfig patch step can be finalized.
+The kubeconfig is Jenkins-ready as-is: `oc whoami`, `bareMetalBastionProxy`
+(which derives the bastion FQDN from the kubeconfig `server:` field), and
+everything downstream work without VPN access to the cluster network.
 
 **Unblocks (Jenkins):**
 [JS-2](jenkins_todos.md#js-2--add-jobparams) — the patched kubeconfig is the only
