@@ -105,14 +105,18 @@ step 6 = `/root/mno/kubeconfig` exists. Consequences:
 - A stopped registry makes resume re-run ALL of setup-bastion (step 3). Don't stop the
   registry while a resume might run.
 - Markers are written only on playbook success. oc-mirror exits non-zero if ANY image
-  fails, so **known-permanent image failures block the step-5 marker forever**. It is
-  legitimate to `touch .sync-operators-done` ONLY after verifying the errors file contains
-  exclusively the known-benign set below.
+  fails, but `allowed_mirror_failure_patterns` (`sync-operator-index` defaults, patched by
+  `deploy_rhoai_bm.sh` with the known-benign set below) makes the playbook itself tolerate
+  those specific failures and still succeed — the step-5 marker is written automatically,
+  no manual `touch` needed. A genuinely new/unmatched error still fails the playbook and
+  blocks the marker: investigate before adding it to the allow-list or touching the marker
+  by hand.
 - Step 3's port check cannot see dead assisted-service containers (see failure playbook).
 
 ## Expected mirror errors — do not chase
 
-At RHOAI 3.5 / 763 images, ≥753 copied is a healthy run. Known-benign failures:
+At RHOAI 3.5 / 763 images, ≥753 copied is a healthy run. Known-benign failures (enforced
+automatically via `allowed_mirror_failure_patterns`, not just operator judgment):
 
 - `rhaii/vllm-{cpu,cuda,gaudi,rocm,spyre}-rhel9` — `manifest unknown`: digests referenced
   by the rhods-operator bundle **do not exist upstream** (stale FBC refs). Unfixable
@@ -184,15 +188,21 @@ time sink; diagnose in this order (~10 min, no reboots):
    ```
    Success signal: hosts register within ~5 min of power-cycle.
 
-**Step 5 playbook failed but mirror log shows only known-benign errors** — verify
-`mirroring_errors_*.txt` against the benign list, `touch .sync-operators-done`, resume.
+**Step 5 playbook failed and mirror log shows errors NOT in the known-benign list** —
+that's the only case requiring manual intervention now (the benign set is tolerated
+automatically). Verify `mirroring_errors_*.txt`, and if the new error is genuinely
+benign, add its pattern to `allowed_mirror_failure_patterns` in `deploy_rhoai_bm.sh`
+(and to the "Expected mirror errors" list above) rather than one-off `touch
+.sync-operators-done`, so future runs tolerate it too.
 
 ## Success criteria & Jenkins handoff
 
-Deployment is complete when `/root/mno/` contains `kubeconfig` (server pre-patched to
-`https://<bastion-fqdn>:6443`), `kubeadmin-password`, `cluster-info.env` (the stable
-Jenkins interface — `CLUSTER_API_URL`, `CLUSTER_APPS_DOMAIN`, `BASTION_FQDN`, …),
-registry CA manifests; and on-cluster: all nodes `Ready`, `gpu-operator*` and
-`rhods-operator*` CSVs `Succeeded`, DSCI `spec.trustedCABundle.customCABundle` non-empty.
-Jenkins consumes `cluster-info.env` directly and reaches the API via the bastion HAProxy —
-no cluster-network access needed.
+Deployment is complete when `/root/mno/` contains `kubeconfig` (untouched `system:admin`
+client-cert, internal API URL — for Jetlag's own steps and local QE use),
+`jenkins-kubeconfig` (a derived copy: server patched to `https://<bastion-fqdn>:6443`,
+bearer token baked in — for Jenkins), `kubeadmin-password`, `cluster-info.env` (the stable
+Jenkins interface — `CLUSTER_API_URL`, `CLUSTER_APPS_DOMAIN`, `BASTION_FQDN`,
+`JENKINS_KUBECONFIG_PATH`, …), registry CA manifests; and on-cluster: all nodes `Ready`,
+`gpu-operator*` and `rhods-operator*` CSVs `Succeeded`, DSCI
+`spec.trustedCABundle.customCABundle` non-empty. Jenkins consumes `cluster-info.env`
+directly and reaches the API via the bastion HAProxy — no cluster-network access needed.
