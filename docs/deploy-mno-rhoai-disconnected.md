@@ -24,6 +24,7 @@ This document describes how this Jetlag fork is adapted for deploying a **discon
   - [Resume Logic](#resume-logic)
   - [Image Sync Tracking](#image-sync-tracking)
   - [Deployment Outputs](#deployment-outputs)
+- [Handing off cluster access](#handing-off-cluster-access)
 - [Known Limitations](#known-limitations)
 
 ---
@@ -347,8 +348,9 @@ After a successful run the following artifacts are written to `/root/mno/` on th
 
 | Artifact | Path | Description |
 |----------|------|-------------|
-| Kubeconfig | `/root/mno/kubeconfig` | Cluster admin kubeconfig. `server:` is patched to `https://<bastion-fqdn>:6443` with `insecure-skip-tls-verify: true` so Jenkins can use it directly without SSH access to the bastion. |
-| kubeadmin password | `/root/mno/kubeadmin-password` | Plaintext cluster admin password. |
+| Kubeconfig | `/root/mno/kubeconfig` | Original cluster admin kubeconfig (`system:admin`, client-certificate auth, internal API URL). **Never patched** — this is what Jetlag's own post-install steps and local QE cluster administration on the bastion use. Non-expiring (client-cert, not a token). |
+| Jenkins kubeconfig | `/root/mno/jenkins-kubeconfig` | Derived copy for external (Jenkins) consumption. `server:` is patched to `https://<bastion-fqdn>:6443` with `insecure-skip-tls-verify: true`, and the user's client-cert auth is replaced with a bearer token (`kube:admin`, minted via an internal API login at deploy time). Regenerated on every `deploy_rhoai_bm.sh` run/resume, so the token never outlives a single pass. |
+| kubeadmin password | `/root/mno/kubeadmin-password` | Plaintext cluster admin password. Needed alongside the kubeconfigs for any browser-driven console login (see [Handing off cluster access](#handing-off-cluster-access)) — a bearer token cannot be typed into a login form. |
 | Cluster info | `/root/mno/cluster-info.env` | Machine-readable env file — stable interface for Jenkins and other consumers. |
 | Registry CA ConfigMap | `/root/mno/registry-ca-configmap.yaml` | OCP manifest to trust the bastion self-signed registry CA. Apply with `oc apply -f`. |
 | Image config patch | `/root/mno/image-config-patch.yaml` | Patch for `image.config.openshift.io/cluster` that references the CA ConfigMap. Apply with `oc patch --patch-file`. |
@@ -359,7 +361,8 @@ After a successful run the following artifacts are written to `/root/mno/` on th
 CLUSTER_API_URL=https://<bastion-fqdn>:6443         # externally reachable API endpoint (via HAProxy)
 CLUSTER_APPS_DOMAIN=apps.<cluster>.<base_dns>        # wildcard app route domain
 BASTION_FQDN=<bastion-fqdn>                         # bastion hostname (publicly resolvable)
-KUBECONFIG_PATH=/root/mno/kubeconfig                 # path to cluster admin kubeconfig (server: patched to bastion FQDN)
+KUBECONFIG_PATH=/root/mno/kubeconfig                 # original cluster admin kubeconfig (system:admin, never patched)
+JENKINS_KUBECONFIG_PATH=/root/mno/jenkins-kubeconfig # bastion-FQDN + bearer-token kubeconfig for Jenkins
 KUBEADMIN_PASSWORD_PATH=/root/mno/kubeadmin-password
 SQUID_HTTP_PROXY=http://<bastion-fqdn>:3128          # Squid forward proxy for app-route resolution
 SQUID_HTTPS_PROXY=http://<bastion-fqdn>:3128         # same proxy for HTTPS CONNECT tunneling
@@ -367,6 +370,43 @@ RHOAI_FBC_IMAGE=<image@digest>                       # FBC image used at deploy 
 ```
 
 External consumers read `CLUSTER_APPS_DOMAIN` to construct app route URLs. `CLUSTER_API_URL` is the externally reachable API endpoint via HAProxy — no direct cluster network access is required. Jenkins sets `HTTPS_PROXY=${SQUID_HTTPS_PROXY}` so pod agents can resolve `*.apps.*` routes through the bastion's local dnsmasq.
+
+---
+
+## Handing off cluster access
+
+Once a deployment finishes, cluster access is typically shared with QE/test-team members who are not on the bastion and need to reach it from their own machines or from Jenkins. Two access patterns:
+
+### CLI / API access (`oc`, ods-ci, quality-gate automation)
+
+Use `/root/mno/jenkins-kubeconfig` (or `/root/mno/kubeconfig` for `system:admin` access on the bastion itself) directly — no `/etc/hosts` changes needed, since its `server:` already points at the bastion FQDN and the bearer token authenticates straight to the API server.
+
+### Browser / console access (OCP console, RHOAI dashboard, monitoring UI)
+
+Routes on the apps domain (`*.apps.<cluster>.<base_dns_name>`) are only resolvable from inside the lab network or through the bastion's Squid proxy — a plain client machine's DNS won't have them. For ad hoc/manual access, add the bastion's lab-network IP to `/etc/hosts` for each route in use:
+
+```
+<bastion-lab-ip>    api.<cluster>.<base_dns_name>
+<bastion-lab-ip>    console-openshift-console.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    oauth-openshift.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    rhods-dashboard-redhat-ods-applications.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    <custom-rhoai-route>.apps.<cluster>.<base_dns_name>   # if a shorter custom Route alias was created for the RHOAI dashboard
+<bastion-lab-ip>    grafana-openshift-monitoring.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    thanos-querier-openshift-monitoring.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    prometheus-k8s-openshift-monitoring.apps.<cluster>.<base_dns_name>
+<bastion-lab-ip>    alertmanager-main-openshift-monitoring.apps.<cluster>.<base_dns_name>
+```
+
+The `api.<cluster>.<base_dns_name>` entry lets the original `/root/mno/kubeconfig` (`system:admin`, `server: https://api.<cluster>.<base_dns_name>:6443`) be used as-is from a local machine on the lab network, without needing the bastion-FQDN-rewritten `jenkins-kubeconfig`.
+
+Login to these UIs uses the real `kubeadmin` username/password from `/root/mno/kubeadmin-password` (a bearer token cannot be typed into a login form) — or, for Jenkins-driven quality-gate runs, whatever dedicated htpasswd identity (e.g. `htpasswd-cluster-admin`) the Jenkins/RHOAI test pipeline itself provisions for that purpose; provisioning that IDP is outside Jetlag's scope.
+
+To view Assisted Installer install details/credentials from a local browser without exposing the port externally, tunnel it over SSH:
+
+```bash
+ssh -L 8080:localhost:8080 root@<bastion-fqdn>
+# then browse to http://localhost:8080
+```
 
 ---
 
