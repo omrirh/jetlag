@@ -352,13 +352,24 @@ CLUSTER_API_URL=https://${BASTION_FQDN}:6443
 CLUSTER_APPS_DOMAIN=apps.${_cluster_name}.${_base_dns_name}
 BASTION_FQDN=${BASTION_FQDN}
 KUBECONFIG_PATH=${MNO_DIR}/kubeconfig
+JENKINS_KUBECONFIG_PATH=${MNO_DIR}/jenkins-kubeconfig
 KUBEADMIN_PASSWORD_PATH=${MNO_DIR}/kubeadmin-password
 RHOAI_FBC_IMAGE=${RHOAI_FBC_IMAGE:-}
 ENV
 echo "      Cluster info env     → ${MNO_DIR}/cluster-info.env"
 
-# Patch kubeconfig server: to bastion FQDN so Jenkins can use it directly.
-patch_kubeconfig_server
+# ${MNO_DIR}/kubeconfig stays untouched (system:admin client-cert, internal API
+# URL) for Jetlag's own post-install steps and local QE cluster administration
+# on the bastion. Jenkins gets a dedicated derived copy instead, refreshed on
+# every run so its bearer token never outlives a single deploy/resume pass.
+cp -f "${MNO_DIR}/kubeconfig" "${MNO_DIR}/jenkins-kubeconfig"
+
+# For enabling Jenkins to authenticate directly against the API server, bake a
+# bearer token (minted via internal API login) into the Jenkins kubeconfig.
+patch_jenkins_kubeconfig_token
+
+# Patch Jenkins kubeconfig server: to bastion FQDN so Jenkins can use it directly.
+patch_jenkins_kubeconfig_server
 
 # Deploy Squid proxy on port 3128 and append proxy vars to cluster-info.env.
 setup_bastion_proxy

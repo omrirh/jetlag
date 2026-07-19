@@ -649,17 +649,78 @@ PYEOF
 }
 
 ################################################################################
-# patch_kubeconfig_server
-#   Rewrites the kubeconfig server: URL from the internal cluster API VIP to
-#   https://<bastion-fqdn>:6443 and enables insecure-skip-tls-verify so that
-#   external consumers (Jenkins) can use the file without SSH access to the
-#   bastion or a copy of the cluster CA.
+# patch_jenkins_kubeconfig_token
+#   Logs in via the internal API URL (resolvable on the bastion) and bakes the
+#   resulting bearer token into the Jenkins kubeconfig's user entry, replacing
+#   the client-cert auth. Lets Jenkins authenticate without ever hitting the
+#   oauth-openshift route (unresolvable from outside the lab network).
+#
+#   Operates on ${MNO_DIR}/jenkins-kubeconfig, never the canonical
+#   ${MNO_DIR}/kubeconfig — that file keeps its non-expiring client-cert auth
+#   for Jetlag's own steps and local QE use.
+#
+#   Idempotent: skipped when the kubeconfig user already carries a `token:`.
+################################################################################
+patch_jenkins_kubeconfig_token() {
+	local _kc="${MNO_DIR}/jenkins-kubeconfig"
+	local _pw_file="${MNO_DIR}/kubeadmin-password"
+	[[ -f "${_kc}" ]] || { echo "      patch_jenkins_kubeconfig_token: ${_kc} not found — skipping"; return 0; }
+	[[ -f "${_pw_file}" ]] || { echo "      patch_jenkins_kubeconfig_token: ${_pw_file} not found — skipping"; return 0; }
+
+	if python3 -c "
+import sys, yaml
+kc = yaml.safe_load(open('${_kc}'))
+sys.exit(0 if any('token' in u['user'] for u in kc.get('users', [])) else 1)
+" 2>/dev/null; then
+		echo "      kubeconfig user already carries a token — skipping"
+		return 0
+	fi
+
+	local _internal_api="https://api.${_cluster_name}.${_base_dns_name}:6443"
+	local _tmp_kc
+	_tmp_kc="$(mktemp)"
+
+	echo "      Logging in via internal API ${_internal_api} to mint a bearer token..."
+	if ! KUBECONFIG="${_tmp_kc}" oc login -u kubeadmin -p "$(cat "${_pw_file}")" "${_internal_api}" --insecure-skip-tls-verify=true >/dev/null 2>&1; then
+		echo "      WARNING: internal login to ${_internal_api} failed — kubeconfig left with client-cert auth only"
+		rm -f "${_tmp_kc}"
+		return 0
+	fi
+
+	local _token
+	_token=$(KUBECONFIG="${_tmp_kc}" oc whoami -t)
+	rm -f "${_tmp_kc}"
+	[[ -n "${_token}" ]] || { echo "      WARNING: could not extract token — skipping"; return 0; }
+
+	KC_TOKEN="${_token}" python3 - "${_kc}" <<'PYEOF'
+import os, sys, yaml
+kc_path = sys.argv[1]
+token = os.environ["KC_TOKEN"]
+with open(kc_path) as f:
+    kc = yaml.safe_load(f)
+for u in kc.get("users", []):
+    u["user"] = {"token": token}
+with open(kc_path, "w") as f:
+    yaml.dump(kc, f, default_flow_style=False)
+PYEOF
+	echo "      kubeconfig user patched with bearer token (client-cert auth replaced) → ${_kc}"
+}
+
+################################################################################
+# patch_jenkins_kubeconfig_server
+#   Rewrites the Jenkins kubeconfig's server: URL from the internal cluster API
+#   VIP to https://<bastion-fqdn>:6443 and enables insecure-skip-tls-verify so
+#   that Jenkins can use the file directly without SSH access to the bastion
+#   or a copy of the cluster CA.
+#
+#   Operates on ${MNO_DIR}/jenkins-kubeconfig, never the canonical
+#   ${MNO_DIR}/kubeconfig — see patch_jenkins_kubeconfig_token.
 #
 #   Idempotent: skipped when server: already points to the bastion FQDN.
 ################################################################################
-patch_kubeconfig_server() {
-	local _kc="${MNO_DIR}/kubeconfig"
-	[[ -f "${_kc}" ]] || { echo "      patch_kubeconfig_server: ${_kc} not found — skipping"; return 0; }
+patch_jenkins_kubeconfig_server() {
+	local _kc="${MNO_DIR}/jenkins-kubeconfig"
+	[[ -f "${_kc}" ]] || { echo "      patch_jenkins_kubeconfig_server: ${_kc} not found — skipping"; return 0; }
 
 	local _current_server
 	_current_server=$(python3 -c "
