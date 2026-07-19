@@ -14,6 +14,9 @@
 | `sync_rhoai_registries_conf` | Writes `registries.conf.d/rhoai.conf` mirror entry so `oc-mirror` resolves `registry.redhat.io/rhoai → quay.io/rhoai` |
 | `image_tag_mirrors` / `image_digest_mirrors` | Vars added to `sync-operator-index` role and documented in sample vars |
 | Catalog digest pinning | `catalogs_to_sync[].catalog` for redhat/community-operator-index replaced with `@sha256:` digests from `ocp-digests.yaml` |
+| `allowed_mirror_failure_patterns` (J-20) | Allow-lists specific `oc-mirror` failures observed not to affect deployment health, so sync no longer hard-fails on them |
+| `patch_jenkins_kubeconfig_token()` (J-21) | Bakes a bearer token (minted via internal API login) into a dedicated `/root/mno/jenkins-kubeconfig`, avoiding the oauth-openshift DNS-resolution failure external `oc login` hits, without touching the canonical `/root/mno/kubeconfig` |
+| Handing off cluster access (docs) | New section in `docs/deploy-mno-rhoai-disconnected.md` templating the `/etc/hosts` + credentials handoff for QE members accessing OCP/RHOAI consoles from local environments |
 
 ---
 
@@ -69,11 +72,14 @@ sourced from this file instead of being entered manually per job run.
 
 ---
 
-### J-2 — ✅ DONE — Patch the kubeconfig for external (Jenkins) consumption
+### J-2 — ✅ DONE — Patch a dedicated kubeconfig for external (Jenkins) consumption
 
-**Implemented** as `patch_kubeconfig_server()` in `deploy_rhoai_bm_utils.sh`,
-called in the post-deploy phase of every run. For each cluster entry in
-`/root/mno/kubeconfig` it:
+**Implemented** as `patch_jenkins_kubeconfig_server()` in `deploy_rhoai_bm_utils.sh`,
+called in the post-deploy phase of every run against `/root/mno/jenkins-kubeconfig`
+— a copy of `/root/mno/kubeconfig` made fresh on every run (see J-21). The canonical
+`/root/mno/kubeconfig` is never touched, so Jetlag's own post-install steps and
+local QE cluster administration on the bastion keep non-expiring `system:admin`
+client-cert access. For each cluster entry in `jenkins-kubeconfig` it:
 
 1. Rewrites `server:` to `https://<bastion-fqdn>:6443` (bastion HAProxy forwards
    6443 to the cluster API; the FQDN is publicly resolvable).
@@ -81,15 +87,14 @@ called in the post-deploy phase of every run. For each cluster entry in
    `certificate-authority-data` — the API TLS cert is issued for
    `api.<cluster>.*`, not the bastion FQDN, so verification would always fail
    (this resolves the former JS-4 TLS-strategy question in favor of skip-verify).
-3. Idempotent: skips when `server:` already points at the bastion FQDN, so
-   `--resume` re-runs are safe.
+3. Idempotent: skips when `server:` already points at the bastion FQDN.
 
-The kubeconfig is Jenkins-ready as-is: `oc whoami`, `bareMetalBastionProxy`
+`jenkins-kubeconfig` is Jenkins-ready as-is: `oc whoami`, `bareMetalBastionProxy`
 (which derives the bastion FQDN from the kubeconfig `server:` field), and
 everything downstream work without VPN access to the cluster network.
 
 **Unblocks (Jenkins):**
-[JS-2](jenkins_todos.md#js-2--add-jobparams) — the patched kubeconfig is the only
+[JS-2](jenkins_todos.md#js-2--add-jobparams) — `jenkins-kubeconfig` is the only
 auth artifact Jenkins needs; no pipeline-side server-URL rewrite required.
 
 ---
@@ -324,6 +329,47 @@ location="registry.stage.redhat.io/rhaii"
 Then add `rhaii/vllm-cuda-rhel9` (and CPU/ROCm/Gaudi/Spyre variants as needed) to the `additional_images` list in the disconnected-imageset so `oc-mirror` picks them up and pushes them to the local bastion registry. Add a corresponding IDMS entry `registry.redhat.io/rhaii` → `bastion:5000/rhaii`.
 
 **Impact:** Without this fix, `LLMInferenceService` objects using any GPU accelerator (NVIDIA CUDA, AMD ROCm, Intel Gaudi, IBM Spyre) will fail to pull the serving image in a disconnected environment.
+
+---
+
+### J-20 — ✅ DONE — Tolerate specific `oc-mirror` failures that haven't affected deployment health
+
+**Problem:** `oc mirror --v2` exits non-zero when *any* image fails to copy, even though it continues mirroring everything else and still generates the cluster-resources manifests. A handful of images consistently fail to mirror, which was hard-blocking the entire deployment even though — as observed across RHOAI/llm-d runs to date — their absence has not affected cluster or workload health.
+
+**Decision:** allow-list these specific failures so the sync step doesn't hard-fail on them, rather than block deployment on images with no immediate fix. This is a pragmatic call based on what's been *observed* so far, not a claim that these are permanently unfixable or unimportant — if any of them is ever found to cause a real deployment or test failure, it should be pulled off the allow-list and root-caused properly at that point.
+
+**Implemented:**
+- `ansible/roles/sync-operator-index/defaults/main.yml` — new `allowed_mirror_failure_patterns: []` var (empty = any error is fatal, preserving original behavior).
+- `ansible/roles/sync-operator-index/tasks/main.yml` — the mirror task now runs with `failed_when: false`, collects the run's `mirroring_errors_*.txt`, and fails only if an error line doesn't match one of the allowed regex patterns (or if rc≠0 but no error report is found at all — fail-closed default).
+- `deploy_rhoai_bm.sh` — writes 5 tolerated-failure patterns into `sync-operator-index.yml` for every RHOAI run:
+  - `registry.redhat.io/rhaii/vllm-*`: bundle references digests deleted upstream (FBC defect — fails on connected clusters too; llm-d tests use their own vllm images).
+  - `rhoai/odh-operator-bundle`: knock-on skip; checked later by the 7c RHODS CSV check.
+  - `nvidia/gpu-operator-bundle`: missing upstream `.sig`; checked later by 7b — if 7b fails, mirror it manually with `--remove-signatures`.
+  - `docker-registry1.mariadb.com` / `context deadline exceeded`: transient network errors; complete on later re-runs.
+- `deploy_rhoai_bm.sh` also propagates `operator_index_name` from `sync-operator-index.yml` into `all.yml`, since `mno-deploy.yml` (step 6) only loads `all.yml` — without this, post-install would fall back to the role default (`redhat-operator-index`) and apply cluster-resources from a working-dir that doesn't exist.
+
+**Unblocks:** Step 5 (sync operator index) completing reliably instead of hard-failing on images with no immediate fix.
+
+**Revisit if:** any of the allow-listed patterns is ever observed to correlate with an actual RHOAI/llm-d deployment or test failure.
+
+---
+
+### J-21 — ✅ DONE — Bake a bearer token into a dedicated Jenkins kubeconfig
+
+**Problem:** Jenkins-side tooling (ods-ci) performs its own `oc login -u kubeadmin -p ... <api-url>` against the OAuth server, which requires resolving `oauth-openshift.apps.<cluster>.<base_dns_name>` — a route only the bastion's local dnsmasq can resolve. From outside the lab network this fails with `dial tcp: lookup ...: no such host`, even with the patched kubeconfig (J-2) and Squid proxy (J-X) already in place.
+
+**Implemented** as `patch_jenkins_kubeconfig_token()` in `deploy_rhoai_bm_utils.sh`, called in the post-deploy phase before `patch_jenkins_kubeconfig_server`. `deploy_rhoai_bm.sh` first copies `/root/mno/kubeconfig` to `/root/mno/jenkins-kubeconfig` on every run (fresh copy each time, so the baked-in token is never older than the current pass), then, since the bastion itself sits inside the lab network and resolves `api.<cluster>.<base_dns_name>` natively:
+1. Logs in via the internal API URL with kubeadmin/password (`--insecure-skip-tls-verify=true` — the internal API cert isn't in the bastion's trust store), into a throwaway `KUBECONFIG`.
+2. Extracts the resulting bearer token with `oc whoami -t`.
+3. Rewrites `jenkins-kubeconfig`'s `users[].user` to `{token: ...}`, replacing the client-certificate credentials. `/root/mno/kubeconfig` itself is never touched.
+
+This lets Jenkins authenticate directly against the API server (which validates bearer tokens itself), with no oauth-openshift route lookup involved — regardless of which `EXTERNAL_AUTH_METHOD` the Jenkins job uses. Identity is `kube:admin` (the OAuth-issued kubeadmin identity), deliberately kept rather than swapped for a dedicated ServiceAccount token — some ods-ci quality-gate tests (`OCPLogin.robot`) drive the actual OCP console login form via Selenium, which needs a real username/password-backed identity; an SA token has no such login flow at all. Console/dashboard UI login itself is handled separately — see [Handing off cluster access](docs/deploy-mno-rhoai-disconnected.md#handing-off-cluster-access) in the docs (`/etc/hosts` entries for apps-domain routes + the real kubeadmin username/password, or a Jenkins/RHOAI-pipeline-provisioned `htpasswd-cluster-admin` IDP where required — provisioning that IDP is outside Jetlag's scope).
+
+Idempotent in the sense that re-running is always safe, but not skip-on-already-patched: because `jenkins-kubeconfig` is recopied from the untouched original every run, this always re-logs-in and mints a fresh token (cheap, bastion-local). Fails soft (warns, leaves client-cert auth in place) if the internal login doesn't succeed.
+
+**Caveat:** the token has the default OpenShift OAuth lifetime (~24h). A `jenkins-kubeconfig` reused well past that window (without Jetlag re-running) will start seeing 401s from Jenkins — a separate expiry case, not a recurrence of the DNS issue. Re-running `deploy_rhoai_bm.sh --resume` refreshes it.
+
+**Unblocks (Jenkins):** ods-ci `oc login` failures such as `Unable to connect to the server: dial tcp: lookup oauth-openshift.apps.<cluster>...: no such host`.
 
 ---
 
