@@ -703,7 +703,7 @@ setup_bastion_proxy() {
 	else
 		echo "      Deploying bastion-proxy role (Squid on port 3128)..."
 		ANSIBLE_ROLES_PATH="${SCRIPT_DIR}/ansible/roles" \
-			ansible-playbook -i "${INVENTORY}" - <<'YAML' 2>&1 | sed 's/^/      /'
+			ansible-playbook -i "${INVENTORY}" -e "@${SCRIPT_DIR}/ansible/vars/lab.yml" -e "@${SCRIPT_DIR}/ansible/vars/all.yml" /dev/stdin <<'YAML' 2>&1 | sed 's/^/      /'
 ---
 - hosts: bastion
   gather_facts: true
