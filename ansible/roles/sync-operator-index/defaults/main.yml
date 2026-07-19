@@ -108,3 +108,8 @@ sync_rhoai_registries_conf: false
 
 image_tag_mirrors: []
 image_digest_mirrors: []
+
+# Regex patterns for oc-mirror image-copy failures that should NOT fail the
+# sync (e.g. catalog references to digests that no longer exist upstream).
+# Empty list = any oc-mirror error is fatal (original behavior).
+allowed_mirror_failure_patterns: []

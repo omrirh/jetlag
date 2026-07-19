@@ -25,9 +25,46 @@
     src: imagesetconf.yml.j2
     dest: "{{ sync_path }}/operators/{{ operator_index_name }}/imagesetconf.yml"
 
+# oc-mirror --v2 exits non-zero when ANY image fails to copy, even though it
+# continues mirroring everything else and still generates the cluster-resources
+# manifests. Some imagesets carry permanently-broken references (e.g. digests
+# that no longer exist upstream), so a hard failure here would block the entire
+# deployment on images that can never succeed. Instead: capture the exit code,
+# then fail only if the mirroring errors report contains entries not matched by
+# allowed_mirror_failure_patterns (default [] = any error is fatal, preserving
+# the original behavior).
 - name: Mirror operator index images
   shell: |
     oc mirror --authfile {{ registry_path }}/pull-secret-bastion.txt -c {{ sync_path }}/operators/{{ operator_index_name }}/imagesetconf.yml --workspace file://{{ sync_path }}/operators/{{ operator_index_name }} docker://{{ registry_host }}:{{ registry_port }} --v2
+  register: oc_mirror_sync
+  failed_when: false
+
+- name: Collect oc-mirror error report
+  shell: |
+    cat "$(ls -t {{ sync_path }}/operators/{{ operator_index_name }}/working-dir/logs/mirroring_errors_*.txt 2>/dev/null | head -1)" 2>/dev/null
+  register: oc_mirror_errors
+  changed_when: false
+  failed_when: false
+  when: oc_mirror_sync.rc != 0
+
+- name: Fail on oc-mirror errors outside allowed_mirror_failure_patterns
+  vars:
+    _allowed: "{{ allowed_mirror_failure_patterns | default([]) }}"
+    _errors: "{{ oc_mirror_errors.stdout_lines | default([]) | select('search', 'error') | list }}"
+    _unexpected: "{{ (_errors | reject('search', _allowed | join('|')) | list) if _allowed | length > 0 else _errors }}"
+  fail:
+    msg: |
+      oc-mirror exited {{ oc_mirror_sync.rc }} with mirroring errors not covered
+      by allowed_mirror_failure_patterns:
+      {{ _unexpected | join('\n') }}
+  when:
+    - oc_mirror_sync.rc != 0
+    - (_unexpected | length > 0) or (_errors | length == 0)
+
+- name: Report tolerated oc-mirror failures
+  debug:
+    msg: "oc-mirror exited {{ oc_mirror_sync.rc }}; all {{ oc_mirror_errors.stdout_lines | default([]) | select('search', 'error') | list | length }} mirroring errors matched allowed_mirror_failure_patterns — continuing"
+  when: oc_mirror_sync.rc != 0
 
 - name: Preserve IDMS for this operator index tag
   ansible.builtin.copy:

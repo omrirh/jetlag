@@ -247,6 +247,31 @@ if [[ -n "${RHOAI_FBC_IMAGE}" ]]; then
 	# are derived from the inspected FBC image before being written to sync-operator-index.yml.
 	# (Step 2 calls it earlier but RHOAI_CATALOG is empty then if --rhoai-catalog wasn't passed.)
 	patch_rhoai_vars
+
+	# Mirror failures tolerated by the sync playbook (see J-20 in jetlag_todos.md
+	# for the full impact assessment). "Allowed" means: cannot be fixed by
+	# re-running the mirror, and must not block cluster deployment — NOT that the
+	# images are unneeded:
+	# - rhaii/vllm-*: bundle references digests deleted upstream (FBC defect —
+	#   would fail on connected clusters too; llm-d tests use their own vllm images)
+	# - odh-operator-bundle: knock-on skip; validated later by 7c rhods CSV check
+	# - nvidia/gpu-operator-bundle: missing upstream .sig; validated later by 7b —
+	#   if 7b fails, mirror it manually with --remove-signatures
+	# - mariadb / context deadline exceeded: transient; complete on later re-runs
+	"${GO_YQ}" e -i '.allowed_mirror_failure_patterns = [
+		"registry\.redhat\.io/rhaii/vllm-",
+		"rhoai/odh-operator-bundle",
+		"nvidia/gpu-operator-bundle",
+		"docker-registry1\.mariadb\.com",
+		"context deadline exceeded"
+	]' "${SYNC_OP_VARS}"
+
+	# mno-deploy.yml (step 6) loads only all.yml, so mirror operator_index_name
+	# there too — otherwise mno-post-cluster-install falls back to the role
+	# default (redhat-operator-index) and applies cluster-resources from a
+	# working-dir that does not exist.
+	_op_idx=$(grep -m1 '^operator_index_name:' "${SYNC_OP_VARS}" | awk '{print $2}' | tr -d '"')
+	[[ -n "${_op_idx}" ]] && patch_yaml_scalar "$ALL_VARS" "operator_index_name" "${_op_idx}"
 fi
 
 if ! should_skip 5 "Sync operator index + additional images to bastion registry"; then
