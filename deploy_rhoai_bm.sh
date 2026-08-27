@@ -257,13 +257,20 @@ if [[ -n "${RHOAI_FBC_IMAGE}" ]]; then
 	# - odh-operator-bundle: knock-on skip; validated later by 7c rhods CSV check
 	# - nvidia/gpu-operator-bundle: missing upstream .sig; validated later by 7b —
 	#   if 7b fails, mirror it manually with --remove-signatures
-	# - mariadb / context deadline exceeded: transient; complete on later re-runs
+	# - mariadb / context deadline exceeded / unexpected EOF: transient network
+	#   blips reading large blobs from upstream CDNs; complete on later re-runs
+	# - openshift-serverless-1/serverless-operator-bundle: knock-on skip when its
+	#   related kn-serving-autoscaler-hpa-rhel9 image hits a transient EOF above;
+	#   validated later — if serverless-operator install/use breaks, mirror the
+	#   bundle + kn-serving-autoscaler-hpa-rhel9 manually and re-run step 5
 	"${GO_YQ}" e -i '.allowed_mirror_failure_patterns = [
 		"registry\.redhat\.io/rhaii/vllm-",
 		"rhoai/odh-operator-bundle",
 		"nvidia/gpu-operator-bundle",
 		"docker-registry1\.mariadb\.com",
-		"context deadline exceeded"
+		"context deadline exceeded",
+		"unexpected EOF",
+		"openshift-serverless-1/serverless-operator-bundle"
 	]' "${SYNC_OP_VARS}"
 
 	# mno-deploy.yml (step 6) loads only all.yml, so mirror operator_index_name

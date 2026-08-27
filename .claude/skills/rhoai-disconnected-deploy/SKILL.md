@@ -124,6 +124,15 @@ automatically via `allowed_mirror_failure_patterns`, not just operator judgment)
 - `nvidia/gpu-operator-bundle` — missing `.sig` on registry.connect.redhat.com.
 - `mariadb:10.11.8` — upstream registry rate limit (transient; usually clears on re-run).
 - `context deadline exceeded` writing blobs — transient; delta re-run completes them.
+- `unexpected EOF` (e.g. `happened during read: unexpected EOF (while reconnecting: Get
+  "https://cdn01.quay.io/...": EOF)`) — same transient-CDN-blip class as `context deadline
+  exceeded`, just a different Go HTTP error string; delta re-run usually completes it.
+- `openshift-serverless-1/serverless-operator-bundle` — knock-on skip when its related
+  `kn-serving-autoscaler-hpa-rhel9` image hits the `unexpected EOF` above. **Not yet
+  verified safe to ignore** (added 2026-08-25, unlike the other entries which are
+  confirmed cosmetic) — watch for serverless-operator / KServe-dependent RHOAI features
+  breaking later. If they do, manually mirror the bundle + `kn-serving-autoscaler-hpa-rhel9`
+  and re-run step 5.
 
 Anything OUTSIDE this list is a real regression — investigate before proceeding.
 
@@ -194,6 +203,31 @@ automatically). Verify `mirroring_errors_*.txt`, and if the new error is genuine
 benign, add its pattern to `allowed_mirror_failure_patterns` in `deploy_rhoai_bm.sh`
 (and to the "Expected mirror errors" list above) rather than one-off `touch
 .sync-operators-done`, so future runs tolerate it too.
+
+**Step 10 hangs on `Waiting for installPlan with csv 'rhods-operator'` then errors
+`installPlan ... was not found`** — `--rhoai-update-channel` (install-time Subscription
+channel) doesn't match `--rhoai-channel` (mirror-side, defaults from the FBC image's
+`defaultChannel` back in step 5). oc-mirror only pulls the channel(s) listed in step
+5's config into the registry, so requesting a *different*, unmirrored channel at
+install time can't ever produce an InstallPlan — CatalogSource/PackageManifest look
+perfectly healthy, so this doesn't fail fast on its own (fixed 2026-08-25:
+`install_rhoai()` now preflight-checks this against the live PackageManifest and
+`die`s with the actual available channels instead of hanging). Recovery if you hit
+the old behavior on an un-patched checkout: `--resume` alone won't fix it — it replays
+the same broken channel. Instead re-run olminstall directly with the channel that's
+actually mirrored (find it via `oc get packagemanifest -n openshift-marketplace -o
+json | jq -r '.items[] | select(.metadata.name=="rhods-operator" and
+.status.catalogSource=="rhoai-catalog-dev") | .status.channels[].name'`):
+```bash
+export KUBECONFIG=/root/mno/kubeconfig
+export MIRROR_REGISTRY="$(hostname -f):5000"
+cd /tmp/olminstall && bash install-operator.sh rhods-operator <real-channel> rhoai-catalog-dev
+```
+`install-operator.sh` applies declaratively (`oc apply`), so this patches the existing
+Subscription's channel in place — safe to run even if the previous attempt is stuck.
+Then continue the rest of step 10 (`create-dsc.sh`, `create-route.sh`,
+`mariadb-operator`) via a normal `--resume` — but pass the *matching* channel on that
+invocation too, or it re-breaks the Subscription right back.
 
 ## Success criteria & Jenkins handoff
 

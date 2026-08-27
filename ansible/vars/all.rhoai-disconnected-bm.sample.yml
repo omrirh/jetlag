@@ -26,7 +26,7 @@ ocp_version: latest-4.19
 public_vlan: false
 sno_use_lab_dhcp: false
 
-enable_fips: false
+enable_fips: true
 enable_techpreview: false
 enable_cnv_install: false
 

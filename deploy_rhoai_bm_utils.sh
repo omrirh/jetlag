@@ -1036,6 +1036,28 @@ install_rhoai() {
 	export KUBECONFIG="${MNO_DIR}/kubeconfig"
 	export MIRROR_REGISTRY="${BASTION_FQDN}:5000"
 
+	# Preflight: --rhoai-update-channel only sets the install-time Subscription
+	# channel. The mirror-side channel (--rhoai-channel, defaulted from the FBC
+	# image's defaultChannel back in step 5) controls what oc-mirror actually
+	# pulled into the registry — channels not listed there never make it into
+	# the mirrored catalog. A mismatch here doesn't fail fast: the Subscription
+	# just sits printing "Waiting for installPlan..." until install-operator.sh's
+	# retry budget is exhausted, then errors with no indication of the real
+	# cause. Catch it here instead, against the catalog actually being used.
+	if [[ -n "${RHOAI_UPDATE_CHANNEL}" ]]; then
+		_available_channels=$(oc get packagemanifest -n openshift-marketplace -o json 2>/dev/null \
+			| jq -r --arg cs "${_catalog_source}" \
+				'.items[] | select(.metadata.name == "rhods-operator" and .status.catalogSource == $cs) | .status.channels[].name' \
+				2>/dev/null)
+		if [[ -n "${_available_channels}" ]] && ! grep -qxF "${RHOAI_UPDATE_CHANNEL}" <<< "${_available_channels}"; then
+			die "$(printf '%s\n%s\n%s\n%s' \
+				"--rhoai-update-channel '${RHOAI_UPDATE_CHANNEL}' is not a channel in the mirrored catalog '${_catalog_source}'." \
+				"Channels actually available there: $(tr '\n' ' ' <<< "${_available_channels}")" \
+				"This means --rhoai-channel (mirror-side, step 5) and --rhoai-update-channel (install-side, this step) disagree." \
+				"Either pass --rhoai-channel matching this value and re-run step 5, or use one of the available channels above.")"
+		fi
+	fi
+
 	cd "${_olminstall_dir}"
 
 	# Helper: give OLM time to create pods, then repair any corrupt blobs

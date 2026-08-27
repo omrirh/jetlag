@@ -126,7 +126,7 @@
 
 - name: Add kube-burner sa
   shell: |
-    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc create sa kubeburner
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc create sa kubeburner --dry-run=client -o yaml | KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f -
   when: setup_kube_burner_sa | default(true) | bool
 
 - name: Add cluster-admin role to kube-burner sa
