@@ -14,6 +14,7 @@
   - "{{ bastion_cluster_config_dir }}/minio"
   - "{{ bastion_cluster_config_dir }}/odf"
   - "{{ bastion_cluster_config_dir }}/openshift-monitoring"
+  - "{{ bastion_cluster_config_dir }}/performance-addon-operator"
 
 - name: Auto-detect ai_cluster_id when not provided
   when: ai_cluster_id is not defined
@@ -82,6 +83,17 @@
     KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc label no --overwrite -l node-role.kubernetes.io/worker {{ item }}
   loop: "{{ post_install_node_labels }}"
 
+- name: Install Performance-Addon-Operator - find channel
+  shell: |
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc get packagemanifest performance-addon-operator -n openshift-marketplace -o jsonpath='{.status.defaultChannel}'
+  register: channel
+  when: install_performance_addon_operator
+
+- name: Install Performance-Addon-Operator - Store channel in var
+  set_fact:
+    ocp_channel: "{{ channel.stdout }}"
+  when: install_performance_addon_operator
+
 - name: Place templated configuration items
   template:
     src: "{{ item.src }}"
@@ -105,6 +117,8 @@
     dest: "{{ bastion_cluster_config_dir }}/odf/odf-storagecluster.yml"
   - src: cluster-monitoring-config.yml.j2
     dest: "{{ bastion_cluster_config_dir }}/openshift-monitoring/cluster-monitoring-config.yml"
+  - src: performance-addon-operator.yml.j2
+    dest: "{{ bastion_cluster_config_dir }}/performance-addon-operator/performance-addon-operator.yml"
   - src: catalogsource.yml.j2
     dest: "{{ bastion_cluster_config_dir }}/catalogsources/catalogsource.yml"
 
@@ -313,3 +327,8 @@
   when: (migrate_monitoring | bool) or ((apply_cluster_monitoring_config | bool) and (setup_lso | bool))
   shell:
     KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc apply -f {{ bastion_cluster_config_dir }}/openshift-monitoring/cluster-monitoring-config.yml
+
+- name: Install Performance-Addon-Operator - create PAO namespace, OperatorGroup and subscription
+  shell: |
+    KUBECONFIG={{ bastion_cluster_config_dir }}/kubeconfig oc create -f {{ bastion_cluster_config_dir }}/performance-addon-operator/performance-addon-operator.yml
+  when: install_performance_addon_operator
