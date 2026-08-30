@@ -87,6 +87,7 @@ cp credentials.env.example credentials.env
 | `AWS_ACCESS_KEY_ID` | S3 → Minio mirroring (`--s3-mirror-config`) |
 | `AWS_SECRET_ACCESS_KEY` | S3 → Minio mirroring (`--s3-mirror-config`) |
 | `AWS_S3_URL` | S3 source endpoint (default: `https://s3.amazonaws.com`) |
+| `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` | Optional. Applied by `bootstrap.sh` via `git config --local` (once, only if not already set) so commits made from this bastion attribute to a real identity instead of the auto-detected `root@<bastion-hostname>`. |
 
 ---
 
