@@ -785,6 +785,59 @@ ENV
 	fi
 }
 
+# create_nfs_pvs — statically binds the 80x100GB NFS exports bastion-rhoai-services
+# already created (${NFS_EXPORT_BASE}/pv-100gb-N) to in-cluster PersistentVolume objects.
+create_nfs_pvs() {
+	echo "==> [post] Creating NFS PersistentVolumes (pv-100gb-1..80)"
+	export KUBECONFIG="${MNO_DIR}/kubeconfig"
+	local _size=100 _created=0 _skipped=0
+	for i in $(seq 1 80); do
+		local _name="pv-${_size}gb-${i}"
+		if oc get pv "${_name}" &>/dev/null; then
+			_skipped=$((_skipped + 1))
+			continue
+		fi
+		oc create -f - &>/dev/null <<YAML
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: ${_name}
+spec:
+  capacity:
+    storage: ${_size}Gi
+  accessModes:
+    - ReadWriteOnce
+  nfs:
+    path: ${NFS_EXPORT_BASE}/${_name}
+    server: ${BASTION_FQDN}
+  persistentVolumeReclaimPolicy: Retain
+YAML
+		_created=$((_created + 1))
+	done
+	echo "      PVs created: ${_created}, already present: ${_skipped}"
+
+	verify_nfs_pvs
+}
+
+# verify_nfs_pvs — confirms each PV exists, is Available/Bound (not Released/Failed),
+# and has a real NFS export directory backing it on the bastion. Read-only.
+verify_nfs_pvs() {
+	echo "      Verifying NFS PVs..."
+	local _size=100 _ok=0 _bad=0
+	for i in $(seq 1 80); do
+		local _name="pv-${_size}gb-${i}"
+		local _phase
+		_phase=$(oc get pv "${_name}" -o jsonpath='{.status.phase}' 2>/dev/null)
+		if [[ "${_phase}" == "Available" || "${_phase}" == "Bound" ]] && [[ -d "${NFS_EXPORT_BASE}/${_name}" ]]; then
+			_ok=$((_ok + 1))
+		else
+			_bad=$((_bad + 1))
+			echo "      WARNING: ${_name} phase='${_phase:-missing}', export dir present=$([[ -d "${NFS_EXPORT_BASE}/${_name}" ]] && echo yes || echo no)"
+		fi
+	done
+	echo "      NFS PVs verified: ${_ok}/80 usable"
+}
+
 # cleanup_rhoai — runs olminstall cleanup.sh -t operator to remove a previous
 # RHOAI install before deploying a different version.
 cleanup_rhoai() {

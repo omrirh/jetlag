@@ -61,6 +61,7 @@ SKIP_IMAGE_REPAIR=false             # --skip-image-repair
 # Well-known bastion paths (fixed for all MNO deployments)
 MNO_DIR="/root/mno"
 BASTION_CA_CERT="/opt/registry/certs/domain.crt"
+NFS_EXPORT_BASE="/var/nfs"
 
 MARKER_SYNC_OCP=".sync-ocp-done"
 MARKER_SYNC_OP=".sync-operators-done"
@@ -349,6 +350,14 @@ YAML
 	fi
 else
 	echo "      WARNING: ${BASTION_CA_CERT} not found — registry CA manifests not generated"
+fi
+
+# NFS PersistentVolumes for the bastion-rhoai-services exports (model registry postgres,
+# AI Hub model catalog, and anything else requesting NFS storage with no storageClassName).
+if [[ -f "${MNO_DIR}/kubeconfig" && -d "${NFS_EXPORT_BASE}" ]]; then
+	create_nfs_pvs
+else
+	echo "      Skipping NFS PVs — ${NFS_EXPORT_BASE} not found (setup_bastion_nfs disabled?)"
 fi
 
 # Emit cluster-info.env — stable interface for Jenkins and external consumers
