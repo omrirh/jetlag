@@ -2,8 +2,8 @@
 
 This document describes how this Jetlag fork is adapted for deploying a **disconnected bare-metal OpenShift cluster on Performance Lab** to run **Red Hat OpenShift AI (RHOAI) with llm-d** as part of the OpenShift AI test suite.
 
-> **Before reading this document**, familiarize yourself with the standard Performance Lab MNO deployment guide:
-> [docs/deploy-mno-performancelab.md](deploy-mno-performancelab.md)
+> **Before reading this document**, familiarize yourself with the standard MNO deployment guide:
+> [docs/deploy-mno.md](deploy-mno.md)
 >
 > This document only covers what is **specific to this use case**.
 
@@ -55,7 +55,7 @@ Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
 ## Prerequisites
 
-Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, obtain pull-secret).
+Complete the standard [Bastion setup](bastion-setup.md) steps (clone repo, obtain pull-secret).
 
 ### FIPS mode
 
@@ -282,6 +282,7 @@ Re-queries Redfish for current MACs and rewrites `nodes-override.json` before th
 | `--ocp-version VERSION` | OCP version string (e.g. `latest-4.19`, `4.19.1`). Patches `all.yml` and `sync-ocp-release.yml`. Also derives `operator_index_tag` for CatalogSource tag filtering. |
 | `--ocp-build BUILD` | OCP build type: `ga`, `dev`, or `ci`. Patches `all.yml`. |
 | `--fips true\|false` | Explicitly set `enable_fips` in `all.yml` (RHOAI disconnected BM sample defaults to `true`). When true, preflight-checks that the bastion's own kernel is already FIPS-enabled and fails immediately if not — see [FIPS mode](#fips-mode). |
+| `--rhoai-catalog URL` | RHOAI FBC fragment catalog URL (digest-pinned). Normally derived automatically from `--rhoai-fbc-image`; set explicitly to override. |
 | `--rhoai-fbc-image URL` | RHOAI FBC image digest (e.g. `quay.io/rhoai/rhoai-fbc-fragment@sha256:…`). Triggers the full disconnected-imageset automation: catalog digest pinning, `additional_images` merge, `operator_index_tag` derivation, and `sync_rhoai_registries_conf`. Requires `GITLAB_TOKEN` in `credentials.env`. |
 | `--rhoai-channel CHANNEL` | Mirror-side channel (e.g. `stable-3.4`, `beta`). Patches `sync-operator-index.yml` so oc-mirror pulls the correct channel's operator bundles from the FBC catalog into the bastion registry (step 5). **Not** the install-time subscription channel — see `--rhoai-update-channel`. |
 | `--rhoai-version VERSION` | RHOAI operator version (e.g. `3.4.0-ea.2`). |
@@ -302,6 +303,8 @@ Re-queries Redfish for current MACs and rewrites `nodes-override.json` before th
 | `--rhoai-catalog-source NAME` | CatalogSource name for RHOAI subscription (default: `rhoai-catalog-dev`). |
 | `--olminstall-repo URL` | Override the `olminstall` Git URL (default: internal GitLab; the repo is public and cloned with `http.sslVerify=false`). |
 | `--add-custom-ca-bundles` | *(step 7d)* Append bastion service CA certs (registry, Minio, PyPI cache, Git cache) to `default-dsci` `spec.trustedCABundle.customCABundle`. Requires RHOAI to be installed (step 7c). |
+| `--cleanup-rhoai` | Runs `olminstall cleanup.sh -t operator` before step 10. Use when redeploying a different RHOAI version on a cluster that already has one installed. |
+| `--skip-image-repair` | Skips the preflight registry blob repair scan (steps 9-10). Use when re-deploying a different RHOAI version on the same cluster. |
 
 ### Steps
 
