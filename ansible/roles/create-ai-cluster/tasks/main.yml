@@ -101,6 +101,31 @@
 
 - name: MNO / VMNO Cluster Creation
   block:
+  # This role always POSTs a new cluster with no check for an existing one of
+  # the same name. Re-running mno-deploy.yml (e.g. via deploy_rhoai_bm.sh
+  # --resume) while a previous cluster is still mid-install therefore creates
+  # a duplicate cluster+infra-env that fights the original one for the same
+  # physical BMCs — boot-iso reboots hosts out of their real install into the
+  # duplicate's discovery ISO. Fail fast instead of silently duplicating.
+  - name: Check for an existing AI cluster with this name
+    uri:
+      url: "http://{{ assisted_installer_host }}:{{ assisted_installer_port }}/api/assisted-install/v2/clusters"
+      method: GET
+      status_code: [200]
+      return_content: true
+    register: existing_clusters_check
+
+  - name: Fail if a cluster with this name already exists
+    fail:
+      msg: >-
+        An Assisted Installer cluster named '{{ cluster_name }}' already exists
+        (id={{ item.id }}, status={{ item.status }}). Re-running this playbook
+        would create a duplicate cluster and reboot hosts out of their current
+        install. If the existing cluster is stale, delete it first:
+        curl -X DELETE http://{{ assisted_installer_host }}:{{ assisted_installer_port }}/api/assisted-install/v2/clusters/{{ item.id }}
+    loop: "{{ existing_clusters_check.json }}"
+    when: item.name == cluster_name
+
   - name: MNO / VMNO - Populate static network configuration with controlplane nodes
     include_tasks: static_network_config.yml
     loop: "{{ groups['controlplane'] }}"
