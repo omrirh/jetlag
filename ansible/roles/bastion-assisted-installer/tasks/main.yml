@@ -116,8 +116,20 @@
     image: "{{ assisted_service_image }}"
     env:
       DUMMY_IGNITION: False
+      # On a FIPS-enabled bastion kernel, this binary's OpenSSL-linked crypto
+      # backend auto-activates GOLANG_FIPS from /proc/sys/crypto/fips_enabled;
+      # if the image's own baked GODEBUG (or Go's native FIPS 140-3 module)
+      # also signals fips140, the two auto-detected backends collide and the
+      # process panics on startup ("GOLANG_FIPS and GODEBUG=fips140 are
+      # mutually exclusive"). Force GOLANG_FIPS=0 for this process only — it
+      # does not affect openshift-install's own FIPS check, which reads
+      # /proc/sys/crypto/fips_enabled directly regardless of this container's
+      # env, nor the fips:true baked into the eventual cluster's RHCOS.
+      GOLANG_FIPS: "0"
     volume:
     - /etc/pki/ca-trust/extracted/pem:/etc/pki/ca-trust/extracted/pem:Z
+    # bundled oc breaks under FIPS; use the bastion's own working oc instead
+    - /usr/local/bin/oc:/usr/local/bin/oc:ro,Z
     state: started
 
 - name: Create assisted image service container in assisted-service pod
