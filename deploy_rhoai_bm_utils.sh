@@ -96,8 +96,13 @@ check_step_done() {
 		[[ -f "ansible/inventory/${CLOUD_ID}.local" ]]
 		;;
 	3)
-		# Registry is up if we get any HTTP response (200 or 401 auth-required both mean it's running)
-		[[ $(curl -sk --max-time 3 -o /dev/null -w "%{http_code}" https://localhost:5000/v2/ 2>/dev/null) != "000" ]]
+		# Registry up (any HTTP response — 200 or 401 auth-required both mean it's running)
+		# AND Assisted Installer API up. Checking only the registry lets step 3 get skipped
+		# while assisted-service is crash-looping (e.g. GOLANG_FIPS/GODEBUG panic after a
+		# FIPS-enabling reboot) since setup-bastion.yml's own idempotent container recreation
+		# never gets a chance to run again.
+		[[ $(curl -sk --max-time 3 -o /dev/null -w "%{http_code}" https://localhost:5000/v2/ 2>/dev/null) != "000" ]] \
+		&& [[ $(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://localhost:8090/api/assisted-install/v2/clusters 2>/dev/null) == "200" ]]
 		;;
 	4)
 		[[ -f "$MARKER_SYNC_OCP" ]]

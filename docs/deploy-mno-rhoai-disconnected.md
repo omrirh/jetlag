@@ -328,7 +328,7 @@ With `--resume`, each step is skipped if its completion condition is already met
 |------|---------------|
 | 1 — Bootstrap venv | `.ansible/bin/activate` exists |
 | 2 — Prepare vars + inventory | `ansible/inventory/${CLOUD_ID}.local` exists |
-| 3 — Setup bastion | Bastion registry responding on port 5000 |
+| 3 — Setup bastion | Bastion registry (port 5000) AND Assisted Installer API (port 8090) both responding |
 | 4 — Sync OCP release | `.sync-ocp-done` marker present |
 | 5 — Sync operator index | `.sync-operators-done` marker present |
 | 6 — Deploy cluster | `/root/mno/kubeconfig` exists |
