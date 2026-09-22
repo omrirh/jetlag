@@ -57,6 +57,16 @@ Default DNS domain for Performance Lab: `rdu3.labs.perfscale.redhat.com`
 
 Complete the standard [Bastion setup](deploy-mno-performancelab.md#bastion-setup) steps (clone repo, obtain pull-secret).
 
+### FIPS mode
+
+This deployment's vars template defaults to `enable_fips: true` in `all.yml`, which requires the bastion itself to be FIPS-enabled first. Run this once per fresh bastion, before your first deploy:
+
+```bash
+fips-mode-setup --enable && reboot
+```
+
+Set `enable_fips: false` in `all.yml` (or pass `--fips false`) if FIPS isn't needed for your deployment — either skips this entirely.
+
 ### Bastion storage
 
 A full disconnected RHOAI mirror needs **~500 GB** in the bastion registry (`/opt/registry`) — more than the root filesystem on most lab bastion models — and the NFS PV exports (`/var/nfs`) grow further once RHOAI workloads run. The sample vars set `bastion_registry_disk: auto` and `bastion_nfs_disk: auto`, which makes `setup-bastion.yml` provision each onto the largest unused disk on the bastion (formatted XFS, mounted, persisted in fstab). The provisioning never writes to a disk that contains anything: only disks with no partitions, no filesystem signature, and nothing mounted are eligible, whether auto-selected or named explicitly (e.g. `bastion_registry_disk: /dev/nvme0n1`). To reuse a disk holding a disposable leftover filesystem, clear it manually first with `wipefs -a <device>`. Set the vars to `""` to skip provisioning — only advisable if the root filesystem has ≥600 GB free.
@@ -271,6 +281,7 @@ Re-queries Redfish for current MACs and rewrites `nodes-override.json` before th
 | `<cloud-id>` | *(required)* Performance Lab cloud allocation ID, e.g. `cloud02` |
 | `--ocp-version VERSION` | OCP version string (e.g. `latest-4.19`, `4.19.1`). Patches `all.yml` and `sync-ocp-release.yml`. Also derives `operator_index_tag` for CatalogSource tag filtering. |
 | `--ocp-build BUILD` | OCP build type: `ga`, `dev`, or `ci`. Patches `all.yml`. |
+| `--fips true\|false` | Explicitly set `enable_fips` in `all.yml` (RHOAI disconnected BM sample defaults to `true`). When true, preflight-checks that the bastion's own kernel is already FIPS-enabled and fails immediately if not — see [FIPS mode](#fips-mode). |
 | `--rhoai-fbc-image URL` | RHOAI FBC image digest (e.g. `quay.io/rhoai/rhoai-fbc-fragment@sha256:…`). Triggers the full disconnected-imageset automation: catalog digest pinning, `additional_images` merge, `operator_index_tag` derivation, and `sync_rhoai_registries_conf`. Requires `GITLAB_TOKEN` in `credentials.env`. |
 | `--rhoai-channel CHANNEL` | Mirror-side channel (e.g. `stable-3.4`, `beta`). Patches `sync-operator-index.yml` so oc-mirror pulls the correct channel's operator bundles from the FBC catalog into the bastion registry (step 5). **Not** the install-time subscription channel — see `--rhoai-update-channel`. |
 | `--rhoai-version VERSION` | RHOAI operator version (e.g. `3.4.0-ea.2`). |

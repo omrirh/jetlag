@@ -15,6 +15,12 @@ Arguments:
 Options:
   --ocp-version VERSION     Override OCP version (e.g. 4.20.1, latest-4.20)
   --ocp-build BUILD         Override OCP build type (ga, dev, ci)
+  --fips true|false         Explicitly set enable_fips in all.yml (RHOAI disconnected BM
+                            sample defaults to true). When true, preflight-checks that this
+                            bastion's kernel is already FIPS-enabled (required by
+                            openshift-install) and fails immediately if not — before any
+                            mirroring starts — rather than only at cluster-install time.
+                            See docs/deploy-mno-rhoai-disconnected.md#fips-mode.
   --rhoai-catalog URL       RHOAI FBC fragment catalog URL (digest-pinned)
   --rhoai-fbc-image URL     RHOAI FBC image; drives disconnected-imageset automation.
                             Always pair with --rhoai-channel: the channel is auto-derived
@@ -500,6 +506,40 @@ _merge_catalog_packages() {
 	if [[ ${_added} -gt 0 ]]; then
 		echo "      [packages] +${_added} operator(s) → ${_target_catalog}"
 	fi
+}
+
+################################################################################
+# FIPS preflight
+#   openshift-install refuses to generate manifests for a FIPS-mode cluster
+#   unless the host actually running it (this bastion, via assisted-service)
+#   is itself FIPS-enabled at the kernel level (/proc/sys/crypto/fips_enabled)
+#   — it validates the invoking host, not just the target install-config.
+#   Left unchecked, this only surfaces at cluster-install time (step 6),
+#   after the multi-hour image mirror (steps 4-5) has already completed.
+#   Check it here instead, before any of that work starts. Deliberately
+#   fail-fast rather than auto-enable+reboot: a fresh Performance Lab bastion
+#   is never FIPS-enabled by default, so with the RHOAI disconnected sample's
+#   enable_fips: true this fires on every first run for a new allocation —
+#   a scripted reboot-and-resume across that boundary is more invasive than
+#   a one-time manual step, especially for the Jenkins/CI entrypoint use case.
+################################################################################
+check_fips_preflight() {
+	local _enable_fips
+	_enable_fips=$(grep -m1 '^enable_fips:' "$ALL_VARS" | awk '{print $2}' | tr -d '"')
+	[[ "${_enable_fips,,}" != "true" ]] && return 0
+
+	local _host_fips
+	_host_fips=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo 0)
+	if [[ "${_host_fips}" != "1" ]]; then
+		die "$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+			"enable_fips: true (ansible/vars/all.yml), but this bastion's kernel is not in FIPS mode." \
+			"openshift-install refuses to generate manifests for a FIPS-mode cluster unless the host" \
+			"running it is itself FIPS-enabled — left unchecked this only fails at cluster-install time" \
+			"(step 6), after the multi-hour image mirror (steps 4-5) has already run. Fix it now instead:" \
+			"  fips-mode-setup --enable && reboot" \
+			"then re-run this command with --resume. Or pass --fips false to deploy without FIPS.")"
+	fi
+	echo "      FIPS preflight: bastion kernel is FIPS-enabled, enable_fips: true is consistent"
 }
 
 ################################################################################

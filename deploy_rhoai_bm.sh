@@ -33,6 +33,7 @@ RHOAI_CHANNEL=""
 NODES_OVERRIDE=""
 RESUME=false
 REFRESH_NODES=false
+FIPS=""
 
 HW_CONFIG="ansible/vars/hw-config.yml"
 ALL_VARS="ansible/vars/all.yml"
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--ocp-version)     OCP_VERSION="$2";     shift 2 ;;
 	--ocp-build)       OCP_BUILD="$2";       shift 2 ;;
+	--fips)            FIPS="$2";            shift 2 ;;
 	--rhoai-catalog)   RHOAI_CATALOG="$2";              shift 2 ;;
 	--rhoai-fbc-image) RHOAI_FBC_IMAGE="$2";            shift 2 ;;
 	--rhoai-version)   RHOAI_VERSION="$2";              shift 2 ;;
@@ -122,6 +124,14 @@ export PATH="/usr/local/bin:${PATH}"
 	"ansible/vars/all.yml not found." \
 	"Create it from the RHOAI disconnected BM template:" \
 	"  cp ansible/vars/all.rhoai-disconnected-bm.sample.yml ansible/vars/all.yml")"
+
+# --fips explicitly overrides enable_fips in all.yml (patched immediately, ahead
+# of the normal step-2 vars patching, so the FIPS preflight check below sees it).
+if [[ -n "$FIPS" ]]; then
+	patch_yaml_scalar "$ALL_VARS" "enable_fips" "${FIPS}"
+	echo "      enable_fips -> ${FIPS}"
+fi
+check_fips_preflight
 
 # Auto-create gitignored vars files from their samples on first run.
 # patch_yaml_scalar / patch_rhoai_vars modify these files; they must exist first.
