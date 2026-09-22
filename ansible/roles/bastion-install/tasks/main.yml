@@ -192,7 +192,7 @@
       - --strip-components=1
   when: supermicro_nodes | default(true)
 
-- name: Get CoreDNS, OpenShift clients, opm, kube-burner, kube-burner-ocp, grpcurl, minio client, and yq
+- name: Get CoreDNS, OpenShift clients, opm, kube-burner, kube-burner-ocp, grpcurl, and yq
   get_url:
     validate_certs: false
     url: "{{ item.url }}"
@@ -211,11 +211,45 @@
     dest: "{{ bastion_cluster_config_dir }}/kube-burner-ocp-linux.tar.gz"
   - url: "{{ grpcurl_url }}"
     dest: "{{ bastion_cluster_config_dir }}/grpcurl-linux.tar.gz"
-  - url: "{{ minio_client_url }}"
-    dest: "/usr/local/bin/mc"
-    mode: "0700"
   - url: "{{ yq_url }}"
     dest: "{{ bastion_cluster_config_dir }}/yq_linux_amd64.tar.gz"
+
+- name: Check if minio client (mc) already installed
+  stat:
+    path: /usr/local/bin/mc
+  register: mc_stat
+
+# dl.min.io no longer serves the OSS `mc` binary — MinIO archived the
+# open-source mc/server/KES projects and every release path (including
+# pinned historical versions) now returns 410 Gone. Extract the binary from
+# the still-published quay.io/minio/mc container image instead.
+- name: Install minio client (mc) from container image
+  when: not mc_stat.stat.exists
+  block:
+  - name: Pull minio/mc image
+    command: podman pull -q {{ minio_client_image }}
+    changed_when: true
+
+  - name: Create temporary container from minio/mc image
+    command: podman create {{ minio_client_image }}
+    register: mc_container
+    changed_when: true
+
+  - name: Copy mc binary out of the container
+    command: podman cp {{ mc_container.stdout }}:/usr/bin/mc /usr/local/bin/mc
+    changed_when: true
+
+  - name: Set mc permissions
+    file:
+      path: /usr/local/bin/mc
+      mode: "0700"
+
+  always:
+  - name: Remove temporary container
+    command: podman rm -f {{ mc_container.stdout }}
+    when: mc_container is defined and mc_container.stdout is defined
+    changed_when: true
+    failed_when: false
 
 - name: Get rhel8 tools
   get_url:
