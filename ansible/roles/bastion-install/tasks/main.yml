@@ -99,6 +99,11 @@
       ssh-keygen -q -t rsa -f /root/.ssh/id_rsa -C "" -N ""
     when: not ssh_key_result.stat.exists
 
+  - name: Trust the bastion's own key for self-SSH
+    ansible.posix.authorized_key:
+      user: root
+      key: "{{ lookup('file', '/root/.ssh/id_rsa.pub') }}"
+
   - name: Setup chronyd
     template:
       src: chrony.conf.j2
